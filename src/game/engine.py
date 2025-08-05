@@ -1,8 +1,12 @@
 # Engine do jogo
+import random
+import socket
+import threading
 import pygame
 import math
 from game.player import Player
 from game.dungeon import Dungeon
+from game.util.light import render_volumetric_light
 
 class GameEngine:
     # Track previous room index for rendering
@@ -25,6 +29,9 @@ class GameEngine:
         self.running = True
         self.previous_room_index = None
         
+        # Light sources
+        self.light_sources = []  # Track all light sources
+        self.light_cache = {} # Cache for light textures
 
         # Câmera/viewport
         self.camera_x = 0
@@ -40,7 +47,7 @@ class GameEngine:
         
         # Obter a sala atual
         self.room = self.dungeon.get_current_room()
-        
+
         # Get spawn position from dungeon
         spawn_x, spawn_y = self.dungeon.get_player_spawn_position()
         self.player = Player(spawn_x, spawn_y)
@@ -57,6 +64,24 @@ class GameEngine:
         # Collision rects debug
         self.show_collision_rects = False
 
+    def add_light_source(self, x, y, radius, intensity=255):
+        self.light_sources.append({
+            'pos': (x, y),
+            'radius': radius,
+            'intensity': intensity
+        })
+        
+    def get_light_texture(self, radius, max_alpha):
+        key = (radius, max_alpha)
+        if key not in self.light_cache:
+            # Create and cache light surface
+            texture = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            for r in range(radius, 0, -1):
+                alpha = int(max_alpha * (r/radius))
+                pygame.draw.circle(texture, (0,0,0,alpha), (radius, radius), r)
+            self.light_cache[key] = texture
+        return self.light_cache[key]
+
     def reset_to_first_room(self):
         """Reset game to first room"""
         self.dungeon.current_room_index = 0
@@ -70,27 +95,7 @@ class GameEngine:
         self.camera_x = spawn_x - self.width // 2
         self.camera_y = spawn_y - self.height // 2
     
-    def _center_camera_on_room(self):
-        """Centraliza a câmera no centro da sala."""
-        room_center_x, room_center_y = self.room.get_center()
-        self.camera_x = room_center_x - self.width // (2 * self.zoom)
-        self.camera_y = room_center_y - self.height // (2 * self.zoom)
-    
-    def _center_camera_on_player(self):
-        """Centraliza a câmera no jogador."""
-        player_center_x = self.player.x + self.player.size // 2
-        player_center_y = self.player.y + self.player.size // 2
-        viewport_width = self.width / self.zoom
-        viewport_height = self.height / self.zoom
-        self.camera_x = player_center_x - viewport_width / 2
-        self.camera_y = player_center_y - viewport_height / 2
-    
-    def _center_camera_on_room(self):
-        room = self.dungeon.get_current_room()
-        viewport_width = self.width / self.zoom
-        viewport_height = self.height / self.zoom
-        self.camera_x = room.x + (room.width / 2) - (viewport_width / 2)
-        self.camera_y = room.y + (room.height / 2) - (viewport_height / 2)
+
 
 
     def _update_camera(self):
@@ -174,21 +179,42 @@ class GameEngine:
         # update camera to follow player
         self._update_camera()
 
-    def cut_radial_light(self, surface, center, radius, max_alpha=255):
-        """Cuts a radial gradient hole by subtracting light from darkness."""
-        cx, cy = center
-
-        # Create a temporary surface with per-pixel alpha
-        light_surface = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
-
-        # Draw a radial gradient (transparent in center, black on edge)
-        for r in range(radius, 0, -1):
-            alpha = int(max_alpha * (r / radius))
-            color = (0, 0, 0, alpha)
-            pygame.draw.circle(light_surface, color, (radius, radius), r)
-
-        # Subtract this from the darkness overlay
-        surface.blit(light_surface, (cx - radius, cy - radius), special_flags=pygame.BLEND_RGBA_SUB)
+    def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
+        """Enhanced lighting with raycasting and performance optimizations"""
+        # Performance settings
+        PERFORMANCE_MODE = "balanced"  # "fast", "balanced", "quality"
+        
+        # Convert parameters for the lighting system
+        px, py = center
+        color = light_color if light_color else (255, 255, 255)
+        
+        # Convert wall rects from world space to surface space if needed
+        processed_walls = []
+        if wall_rects:
+            for wall in wall_rects:
+                # Convert to surface coordinates (relative to the darkness overlay)
+                wall_x = wall.x - self.camera_x
+                wall_y = wall.y - self.camera_y
+                processed_walls.append(pygame.Rect(wall_x, wall_y, wall.width, wall.height))
+        
+        # Create temporary surface for the light
+        light_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        
+        # Render the volumetric light
+        render_volumetric_light(
+            light_surface,
+            radius, radius,  # Center on our temp surface
+            radius=radius,
+            color=color,
+            breathing_intensity=0.1,
+            flicker_intensity=0.05,
+            wall_rects=processed_walls,
+            performance_mode=PERFORMANCE_MODE
+        )
+        
+        # Subtract the light from darkness (inverse of normal additive blending)
+        surface.blit(light_surface, (px - radius, py - radius), 
+                    special_flags=pygame.BLEND_RGBA_SUB)
 
 
 
@@ -229,6 +255,19 @@ class GameEngine:
         darkness_overlay = pygame.Surface((virtual_width, virtual_height), pygame.SRCALPHA)
         darkness_overlay.fill((0, 0, 0, 255))  # Fully opaque black
 
+            # Cut light holes for ALL light sources
+        for light in self.light_sources:
+            # Convert to screen coordinates
+            light_x = light['pos'][0] - self.camera_x
+            light_y = light['pos'][1] - self.camera_y
+            
+            self.cut_radial_light(
+                darkness_overlay,
+                (light_x, light_y),
+                light['radius'],
+                light['intensity']
+            )
+            
         floor_screen_rect = pygame.Rect(
             current_room.x - self.camera_x,
             current_room.y - self.camera_y,
@@ -311,6 +350,7 @@ class GameEngine:
 
     def run(self):
         while self.running:
+            
             self.handle_events()
             self.update()
             self.render()

@@ -1069,7 +1069,7 @@ class Dungeon:
                     self.last_transition_time = now
                 break
 
-    # Deprecated: check_opening_transitions is no longer used. Use update_player_room instead.
+
 
     
     def get_opening_trigger_rects(self, camera_x=0, camera_y=0):

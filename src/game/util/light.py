@@ -3,11 +3,10 @@ import math
 import random
 import time
 
+
 # Global performance settings
 PERFORMANCE_MODE = "balanced"  # "fast", "balanced", "quality"
 _light_time = 0
-
-
 LIGHT_MASK_CACHE = {}
 
 def get_cached_light_mask(radius, performance_mode):
@@ -278,7 +277,7 @@ def create_soft_player_light(surface, px, py, radius=180, wall_rects=None, retur
     if not return_light_surface and not return_rays_surface:
         return render_volumetric_light(
             surface, px, py, radius,
-            color=(100, 100, 70),  # Dimmer, more transparent light
+            color=(75, 75, 75),  # Dimmer, more transparent light
             breathing_intensity=0.05,  # Subtle breathing
             flicker_intensity=0.3,   # Reduced flicker
             wall_rects=wall_rects,
@@ -301,13 +300,3 @@ def create_soft_player_light(surface, px, py, radius=180, wall_rects=None, retur
         else:
             return light_surface, (px - (radius + 10), py - (radius + 10))
 
-def create_stable_player_light(surface, px, py, radius=180, wall_rects=None):
-    """Create a completely stable light for the player - no breathing or flicker"""
-    return render_volumetric_light(
-        surface, px, py, radius,
-        color=(240, 240, 200),  # Softer, warmer white
-        breathing_intensity=0.0,  # No breathing
-        flicker_intensity=0.0,   # No flicker
-        wall_rects=wall_rects,
-        performance_mode="balanced"
-    )

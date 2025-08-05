@@ -9,9 +9,7 @@ class RoomGenerator:
     
     def __init__(self, tile_size=20):
         self.tile_size = tile_size
-        self.wall_color = (40, 35, 30)  # Pedra escura
-        self.floor_color = (25, 20, 15)  # Chão de pedra
-        
+
     def generate_rectangular_room(self, x, y, min_width=12, max_width=25, min_height=12, max_height=20, allow_islands=True, allow_subrooms=True, is_first_room=False):
         """Gera uma sala retangular simples."""
         width = random.randint(min_width, max_width) * self.tile_size
@@ -74,8 +72,9 @@ class TiledRoom(Room):
         self.y = y
         self.width = width
         self.height = height
-        self.wall_color = (40, 35, 30)  # Pedra escura
-        self.floor_color = (25, 20, 15)  # Chão de pedra
+        self.wall_color = (60, 55, 70)  # Muted dark gray with purple undertones
+        self.floor_color = (20, 18, 28)  # Very dark gray/black with a subtle purple tint
+
         self.wall_tiles = self._generate_wall_tiles()
         self.decorations = []
         self._add_concave_corner_fillers()
@@ -157,7 +156,7 @@ class TiledRoom(Room):
         )
         pygame.draw.rect(surface, self.wall_color, render_rect)
         
-        color = (100, 80, 60)
+        color = (255, 255, 255)
         line_width = 2
         
         # Ajustes para linhas direita e inferior para ficarem dentro do retângulo
@@ -225,8 +224,7 @@ class TiledRoom(Room):
                 debug_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
                 pygame.draw.rect(surface, (255, 0, 0), debug_rect, 2)
 
-# As classes CrossShapedRoom, CircularRoom, LShapedRoom, UShapedRoom, HShapedRoom, JShapedRoom, ZigZagRoom, MazeRoom permanecem inalteradas.
-# Elas herdam de TiledRoom e, portanto, herdam a correção para cantos côncavos.
+
 
 class LShapedRoom(TiledRoom):
     """Sala em formato de L usando tiles."""
