@@ -80,18 +80,48 @@ class GameEngine:
         """Centraliza a câmera no jogador."""
         player_center_x = self.player.x + self.player.size // 2
         player_center_y = self.player.y + self.player.size // 2
-        self.camera_x = player_center_x - self.width // (2 * self.zoom)
-        self.camera_y = player_center_y - self.height // (2 * self.zoom)
+        viewport_width = self.width / self.zoom
+        viewport_height = self.height / self.zoom
+        self.camera_x = player_center_x - viewport_width / 2
+        self.camera_y = player_center_y - viewport_height / 2
     
+    def _center_camera_on_room(self):
+        room = self.dungeon.get_current_room()
+        viewport_width = self.width / self.zoom
+        viewport_height = self.height / self.zoom
+        self.camera_x = room.x + (room.width / 2) - (viewport_width / 2)
+        self.camera_y = room.y + (room.height / 2) - (viewport_height / 2)
+
+
     def _update_camera(self):
-        """Atualiza a câmera para seguir o jogador suavemente."""
-        # Posição alvo da câmera (centrada no jogador)
         player_center_x = self.player.x + self.player.size // 2
         player_center_y = self.player.y + self.player.size // 2
-        target_camera_x = player_center_x - self.width // (2 * self.zoom)
-        target_camera_y = player_center_y - self.height // (2 * self.zoom)
-        
-        # Interpolação suave para a posição alvo
+
+        viewport_width = self.width / self.zoom
+        viewport_height = self.height / self.zoom
+
+        # Target camera pos centered on player
+        target_camera_x = player_center_x - viewport_width / 2
+        target_camera_y = player_center_y - viewport_height / 2
+
+        room = self.dungeon.get_current_room()
+
+        # Clamp only if room is larger than viewport, otherwise center room
+        if room.width > viewport_width:
+            min_camera_x = room.x
+            max_camera_x = room.x + room.width - viewport_width
+            target_camera_x = max(min_camera_x, min(target_camera_x, max_camera_x))
+        else:
+            target_camera_x = room.x + (room.width - viewport_width) / 2
+
+        if room.height > viewport_height:
+            min_camera_y = room.y
+            max_camera_y = room.y + room.height - viewport_height
+            target_camera_y = max(min_camera_y, min(target_camera_y, max_camera_y))
+        else:
+            target_camera_y = room.y + (room.height - viewport_height) / 2
+
+        # Smooth move camera
         self.camera_x += (target_camera_x - self.camera_x) * self.camera_smoothing
         self.camera_y += (target_camera_y - self.camera_y) * self.camera_smoothing
 
@@ -144,57 +174,99 @@ class GameEngine:
         # update camera to follow player
         self._update_camera()
 
+    def cut_radial_light(self, surface, center, radius, max_alpha=255):
+        """Cuts a radial gradient hole by subtracting light from darkness."""
+        cx, cy = center
+
+        # Create a temporary surface with per-pixel alpha
+        light_surface = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+
+        # Draw a radial gradient (transparent in center, black on edge)
+        for r in range(radius, 0, -1):
+            alpha = int(max_alpha * (r / radius))
+            color = (0, 0, 0, alpha)
+            pygame.draw.circle(light_surface, color, (radius, radius), r)
+
+        # Subtract this from the darkness overlay
+        surface.blit(light_surface, (cx - radius, cy - radius), special_flags=pygame.BLEND_RGBA_SUB)
+
+
 
     def render(self):
-        self.screen.fill((10, 10, 15))  # Dark background
-        
-        # Render the current and previous room, and the player in both
+        # Render the current room and all adjacent rooms
         current_room = self.dungeon.get_current_room()
-        previous_room = None
-        if self.previous_room_index is not None:
-            previous_room = self.dungeon.rooms[self.previous_room_index]
+        current_index = self.dungeon.current_room_index
+        adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
+        rooms_to_render = [current_room] + adjacent_rooms
 
-        rooms_to_render = [current_room]
-        if previous_room and previous_room != current_room:
-            rooms_to_render.append(previous_room)
-
+        # Create a virtual surface for zoomed rendering if needed
         if abs(self.zoom - 1.0) > 0.05:
             virtual_width = int(self.width / self.zoom)
             virtual_height = int(self.height / self.zoom)
             virtual_surface = pygame.Surface((virtual_width, virtual_height))
-            virtual_surface.fill((10, 10, 15))
+            virtual_surface.fill((0, 0, 0))
+        else:
+            virtual_surface = self.screen
+            virtual_width = self.width
+            virtual_height = self.height
 
-            # Render current and previous room
-            for room in rooms_to_render:
-                room.render(virtual_surface, self.camera_x, self.camera_y, show_collision_rects=self.show_collision_rects)
+        # Render all rooms (current and adjacent)
+        for room in rooms_to_render:
+            room.render(virtual_surface, self.camera_x, self.camera_y, 
+                    show_collision_rects=self.show_collision_rects)
+            
 
-            # Render the player in both rooms
-            self.player.render(
-                virtual_surface,
-                self.camera_x,
-                self.camera_y,
-                rooms_to_render,
-                show_collision_rects=self.show_collision_rects
-            )
+        # Render the player
+        self.player.render(
+            virtual_surface,
+            self.camera_x,
+            self.camera_y,
+            rooms_to_render,
+            show_collision_rects=self.show_collision_rects
+        )
 
-            # Scale and draw to real screen
+        # --- DARKNESS OVERLAY ---
+        darkness_overlay = pygame.Surface((virtual_width, virtual_height), pygame.SRCALPHA)
+        darkness_overlay.fill((0, 0, 0, 255))  # Fully opaque black
+
+        floor_screen_rect = pygame.Rect(
+            current_room.x - self.camera_x,
+            current_room.y - self.camera_y,
+            current_room.width,
+            current_room.height
+        )
+        darkness_overlay.fill((0, 0, 0, 0), floor_screen_rect)
+        
+        player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
+        player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
+        player_center = (player_center_x, player_center_y)
+        light_radius = 130  # or self.player_light_radius if you have
+        self.cut_radial_light(darkness_overlay, player_center, 100)
+
+
+        # Create player light mask using ray casting (if needed, can be added here)
+        player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
+        player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
+
+        # Collect wall rects in screen space (if needed for future light logic)
+        wall_rects = []
+        for room in rooms_to_render:
+            for wall in room.get_wall_rects():
+                screen_wall = pygame.Rect(
+                    wall.x - self.camera_x,
+                    wall.y - self.camera_y,
+                    wall.width,
+                    wall.height
+                )
+                wall_rects.append(screen_wall)
+
+        # Apply darkness overlay to scene
+        virtual_surface.blit(darkness_overlay, (0, 0), special_flags=pygame.BLEND_PREMULTIPLIED)
+
+        # Scale to screen if zoomed
+        if abs(self.zoom - 1.0) > 0.05:
             scaled_surface = pygame.transform.scale(virtual_surface, (self.width, self.height))
             self.screen.blit(scaled_surface, (0, 0))
-        else:
-            self.screen.fill((10, 10, 15))
-
-            # Render current and previous room
-            for room in rooms_to_render:
-                room.render(self.screen, self.camera_x, self.camera_y, show_collision_rects=self.show_collision_rects)
-
-            # Render the player in both rooms
-            self.player.render(
-                self.screen,
-                self.camera_x,
-                self.camera_y,
-                rooms_to_render,
-                show_collision_rects=self.show_collision_rects
-            )
 
         # Render UI (always on top)
         self.dungeon.render_ui(self.screen)

@@ -43,9 +43,9 @@ def create_light_mask(radius):
         alpha = int(120 * (normalized_r ** 1.0))  # Reduced base alpha for smoother breathing
         
         c = (
-            min(255, 255 * fade * 0.5),  # Slightly higher intensity to compensate
-            min(255, 255 * fade * 0.5),
-            min(255, 255 * fade * 0.5),
+            min(255, 255 * fade * 1),  # Lower intensity for dimmer core
+            min(255, 255 * fade * 1),
+            min(255, 255 * fade * 1),
             alpha
         )
         pygame.draw.circle(mask, c, (radius, radius), r)
@@ -118,6 +118,7 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     # Create light surface with fixed size
     light_size = effective_radius * 2
     light_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
+    rays_only_surface = None
     
     # ====== CACHED LIGHT MASK SECTION ======
     # Get cached base mask (grayscale)
@@ -137,30 +138,27 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     if performance_mode != "fast":
         rays = 16 if performance_mode == "balanced" else 24  # Reduced ray count
         ray_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
-        
         for i in range(rays):
-            angle = 2 * math.pi * i / rays + random.uniform(-0.1, 0.1)  # Add slight randomness
-            length = effective_radius * (0.6 + 0.3 * random.random())  # More varied length
+            angle = 2 * math.pi * i / rays + random.uniform(-0.1, 0.1)
+            length = effective_radius * (0.6 + 0.3 * random.random())
             end_x = effective_radius + length * math.cos(angle)
             end_y = effective_radius + length * math.sin(angle)
-            
-            # Much lower alpha for subtler rays, also affected by intensity
             alpha = int((15 if performance_mode == "balanced" else 25) * intensity_multiplier)
             ray_color = (
-                int(adjusted_color[0] * 0.7),  # Dimmer rays with adjusted color
+                int(adjusted_color[0] * 0.7),
                 int(adjusted_color[1] * 0.7),
                 int(adjusted_color[2] * 0.7),
-                max(5, alpha)  # Ensure minimum visibility
+                max(5, alpha)
             )
-            
             pygame.draw.line(
-                ray_surface, 
-                ray_color, 
+                ray_surface,
+                ray_color,
                 (effective_radius, effective_radius),
                 (end_x, end_y),
-                1  # Thinner rays
+                1
             )
-        
+        # Save rays only surface for masking
+        rays_only_surface = ray_surface.copy()
         # Use normal blending instead of additive for subtler effect
         light_surface.blit(ray_surface, (0, 0), special_flags=pygame.BLEND_ALPHA_SDL2)
     
@@ -215,11 +213,14 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
         light_surface.blit(shadow_surface, (0, 0))
     
     # Draw light to main surface
-    surface.blit(
-        light_surface, 
-        (px - effective_radius, py - effective_radius),
-        special_flags=pygame.BLEND_RGBA_ADD
-    )
+    if surface is not None:
+        surface.blit(
+            light_surface, 
+            (px - effective_radius, py - effective_radius),
+            special_flags=pygame.BLEND_RGBA_ADD
+        )
+    # Optionally return rays_only_surface for masking
+    return light_surface, rays_only_surface, effective_radius
 
 # Predefined light types with optimized parameters
 def create_torch_light(surface, px, py, radius=120, wall_rects=None):
@@ -272,16 +273,33 @@ def create_cinematic_torch(surface, px, py, radius=150, wall_rects=None):
         performance_mode="quality"
     )
 
-def create_soft_player_light(surface, px, py, radius=180, wall_rects=None):
-    """Create a soft, ambient light suitable for the player"""
-    return render_volumetric_light(
-        surface, px, py, radius,
-        color=(100, 100, 70),  # Dimmer, more transparent light
-        breathing_intensity=0.05,  # Subtle breathing
-        flicker_intensity=0.3,   # Reduced flicker
-        wall_rects=wall_rects,
-        performance_mode="balanced"
-    )
+def create_soft_player_light(surface, px, py, radius=180, wall_rects=None, return_light_surface=False, return_rays_surface=False):
+    """Create a soft, ambient light suitable for the player. If return_light_surface is True, returns the light surface instead of drawing it."""
+    if not return_light_surface and not return_rays_surface:
+        return render_volumetric_light(
+            surface, px, py, radius,
+            color=(100, 100, 70),  # Dimmer, more transparent light
+            breathing_intensity=0.05,  # Subtle breathing
+            flicker_intensity=0.3,   # Reduced flicker
+            wall_rects=wall_rects,
+            performance_mode="balanced"
+        )
+    else:
+        import pygame
+        light_size = (radius + 10) * 2
+        temp_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
+        light_surface, rays_surface, effective_radius = render_volumetric_light(
+            temp_surface, radius + 10, radius + 10, radius,
+            color=(100, 100, 70),
+            breathing_intensity=0.05,
+            flicker_intensity=0.3,
+            wall_rects=wall_rects,
+            performance_mode="balanced"
+        )
+        if return_rays_surface:
+            return rays_surface, (px - (radius + 10), py - (radius + 10))
+        else:
+            return light_surface, (px - (radius + 10), py - (radius + 10))
 
 def create_stable_player_light(surface, px, py, radius=180, wall_rects=None):
     """Create a completely stable light for the player - no breathing or flicker"""

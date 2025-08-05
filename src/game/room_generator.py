@@ -157,41 +157,49 @@ class TiledRoom(Room):
         )
         pygame.draw.rect(surface, self.wall_color, render_rect)
         
+        color = (100, 80, 60)
+        line_width = 2
+        
+        # Ajustes para linhas direita e inferior para ficarem dentro do retângulo
+        right_x = render_rect.right - 2
+        bottom_y = render_rect.bottom - 2
+        
         if tile_type == 'concave_filler':
             # Não desenha contorno, apenas o preenchimento
             pass
         elif tile_type == 'corner_top_left':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), 2)
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), line_width)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), line_width)
         elif tile_type == 'corner_top_right':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), 2)
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.right, render_rect.top), (render_rect.right, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), line_width)
+            pygame.draw.line(surface, color, 
+                            (right_x, render_rect.top), (right_x, render_rect.bottom), line_width)
         elif tile_type == 'corner_bottom_left':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.bottom), (render_rect.right, render_rect.bottom), 2)
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, bottom_y), (render_rect.right, bottom_y), line_width)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), line_width)
         elif tile_type == 'corner_bottom_right':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.bottom), (render_rect.right, render_rect.bottom), 2)
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.right, render_rect.top), (render_rect.right, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, bottom_y), (render_rect.right, bottom_y), line_width)
+            pygame.draw.line(surface, color, 
+                            (right_x, render_rect.top), (right_x, render_rect.bottom), line_width)
         elif tile_type == 'wall_top':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.right, render_rect.top), line_width)
         elif tile_type == 'wall_bottom':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.bottom), (render_rect.right, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, bottom_y), (render_rect.right, bottom_y), line_width)
         elif tile_type == 'wall_left':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (render_rect.left, render_rect.top), (render_rect.left, render_rect.bottom), line_width)
         elif tile_type == 'wall_right':
-            pygame.draw.line(surface, (100, 80, 60), 
-                           (render_rect.right, render_rect.top), (render_rect.right, render_rect.bottom), 2)
+            pygame.draw.line(surface, color, 
+                            (right_x, render_rect.top), (right_x, render_rect.bottom), line_width)
+
     
     def get_wall_rects(self):
         """Retorna uma lista com todos os retângulos das paredes para detecção de colisão."""

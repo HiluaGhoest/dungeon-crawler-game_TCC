@@ -1,6 +1,6 @@
 import pygame
 import random
-from collections import deque
+from collections import defaultdict, deque
 from game.room_generator import RoomGenerator
 
 
@@ -28,7 +28,8 @@ class Dungeon:
         self.room_connections = {}  # Tracks connections between rooms
         self.room_parent = {}       # Tracks parent-child relationships
         self.room_depth = {}        # Tracks depth from start room
-        
+        self.occupied_positions = set()
+
         # Generate all rooms at their final positions
         self._generate_and_position_rooms()
         
@@ -39,6 +40,13 @@ class Dungeon:
     def _generate_and_position_rooms(self):
         """Generate and position all rooms of the dungeon with branching paths."""
         print(f"[DUNGEON] Generating {self.total_rooms} rooms with branching...")
+        self.room_reserved_sides = defaultdict(set)
+        self.direction_deltas = {
+            'top': (0, -1),
+            'bottom': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0),
+        }
 
         # Create first room
         first_room = self.room_generator.generate_rectangular_room(
@@ -58,10 +66,22 @@ class Dungeon:
             parent_idx = room_queue.popleft()
             parent_depth = self.room_depth[parent_idx]
 
+            possible_sides = ['top', 'bottom', 'left', 'right']
+            random.shuffle(possible_sides)
+
             branches = random.randint(1, min(self.branching_factor, self.total_rooms - rooms_created))
             for _ in range(branches):
                 if rooms_created >= self.total_rooms:
                     break
+
+                # Get available sides for this parent
+                used_sides = self.room_reserved_sides[parent_idx]
+                available_sides = [side for side in possible_sides if side not in used_sides]
+                if not available_sides:
+                    break  # No more directions to branch
+
+                chosen_side = available_sides[0]
+                self.room_reserved_sides[parent_idx].add(chosen_side)
 
                 child_idx = rooms_created
                 self.rooms[child_idx] = None  # Placeholder
@@ -74,6 +94,12 @@ class Dungeon:
 
                 room_queue.append(child_idx)
                 rooms_created += 1
+
+                
+                # Store this directional connection
+                if parent_idx not in self.room_opening_sides:
+                    self.room_opening_sides[parent_idx] = {'next': {}}
+                self.room_opening_sides[parent_idx]['next'][child_idx] = chosen_side
 
         # SECOND PASS: Generate rooms and position them
         room_queue = deque([0])
@@ -172,7 +198,23 @@ class Dungeon:
             fallback_gap = self.tile_size * 5
             dx = parent_room.x + parent_room.width + fallback_gap - child_room.x
             dy = parent_room.y - child_room.y
+            proposed_x = child_room.x + dx
+            proposed_y = child_room.y + dy
+            proposed_pos = (proposed_x, proposed_y)
+
+            # Check for overlapping room positions
+            if proposed_pos in self.occupied_positions:
+                print(f"[WARNING] Overlapping room detected at {proposed_pos}. Trying to shift...")
+                
+                # Try shifting away to avoid overlap (example: shift right multiple tiles)
+                # You can expand this to try multiple fallback directions
+                dx += self.tile_size * 10  # shift further to the right
+                proposed_x = child_room.x + dx
+                proposed_y = child_room.y + dy
+                proposed_pos = (proposed_x, proposed_y)
+
             child_room.shift_position(dx, dy)
+            self.occupied_positions.add((child_room.x, child_room.y))
             print(f"[DUNGEON] Room {child_idx} (fallback) positioned at ({child_room.x}, {child_room.y})")
         
     def _get_opening_rect(self, room, opening_type):
@@ -1449,7 +1491,7 @@ class Dungeon:
         self._render_mini_map(surface)
 
     def _render_mini_map(self, surface):
-        """Render a zoomed-in mini-map showing only current room and nearby connected rooms."""
+        """Render a 3x3 grid mini-map centered on the current room, showing adjacent and next rooms."""
         map_size = 150
         map_margin = 20
         map_x = surface.get_width() - map_size - map_margin
@@ -1460,89 +1502,114 @@ class Dungeon:
         pygame.draw.rect(surface, (40, 40, 60), map_bg)
         pygame.draw.rect(surface, (100, 100, 140), map_bg, 2)
 
-        # Get rooms to display: current + neighbors + optional neighbors of neighbors
+        grid_size = 3
+        cell_size = (map_size - 20) // grid_size
+        grid_origin_x = map_x + 10
+        grid_origin_y = map_y + 10
+
+        # Center of grid
+        center = (1, 1)
         current_idx = self.current_room_index
-        to_show = set([current_idx])
-        neighbors = self.room_connections.get(current_idx, [])
-        to_show.update(neighbors)
-        # Optionally include neighbors of neighbors:
-        # for n in neighbors:
-        #     to_show.update(self.room_connections.get(n, []))
-        
-        # Extract those rooms
-        rooms_to_draw = {idx: self.rooms[idx] for idx in to_show}
 
-        # Calculate bounding box of these rooms
-        min_x = min(room.x for room in rooms_to_draw.values())
-        max_x = max(room.x + room.width for room in rooms_to_draw.values())
-        min_y = min(room.y for room in rooms_to_draw.values())
-        max_y = max(room.y + room.height for room in rooms_to_draw.values())
+        # Build grid: (row, col) -> room index
+        grid = [[None for _ in range(grid_size)] for _ in range(grid_size)]
+        grid[center[0]][center[1]] = current_idx
 
-        # Calculate scale and offset for zoomed-in view with padding
-        padding = 20
-        scale_x = (map_size - 2 * padding) / max(1, max_x - min_x)
-        scale_y = (map_size - 2 * padding) / max(1, max_y - min_y)
-        scale = min(scale_x, scale_y)
+        # Map directions to grid offsets
+        dir_offsets = {
+            'top': (-1, 0),
+            'bottom': (1, 0),
+            'left': (0, -1),
+            'right': (0, 1)
+        }
 
-        offset_x = map_x + padding - min_x * scale
-        offset_y = map_y + padding - min_y * scale
+        # Place adjacent rooms in grid
+        for conn_idx in self.room_connections.get(current_idx, []):
+            # Try to determine direction from opening_sides if available
+            side = None
+            opening_sides = self.room_opening_sides.get(current_idx, {})
+            if 'next' in opening_sides and isinstance(opening_sides['next'], dict):
+                for child_idx, s in opening_sides['next'].items():
+                    if child_idx == conn_idx:
+                        side = s
+                        break
+            # Fallback: try parent relationship
+            if side is None and self.room_parent.get(conn_idx) == current_idx:
+                # Guess direction based on index difference (not always accurate)
+                if conn_idx > current_idx:
+                    side = 'right'
+                else:
+                    side = 'left'
+            # Place in grid
+            if side in dir_offsets:
+                dr, dc = dir_offsets[side]
+                r, c = center[0] + dr, center[1] + dc
+                if 0 <= r < grid_size and 0 <= c < grid_size:
+                    grid[r][c] = conn_idx
 
-        def rect_center(rect):
-            return (rect.x + rect.width / 2, rect.y + rect.height / 2)
-
-        def closest_points_between_rects(rect1, rect2):
-            cx1, cy1 = rect_center(rect1)
-            x = max(rect2.left, min(cx1, rect2.right))
-            y = max(rect2.top, min(cy1, rect2.bottom))
-            return (cx1, cy1), (x, y)
-
-        # Draw connections only between rooms in to_show
-        for room_idx, connections in self.room_connections.items():
-            if room_idx not in to_show:
-                continue
-            room = self.rooms[room_idx]
-            room_rect = pygame.Rect(
-                offset_x + room.x * scale,
-                offset_y + room.y * scale,
-                room.width * scale,
-                room.height * scale
-            )
-            for conn_idx in connections:
-                if conn_idx not in to_show:
-                    continue
-                conn_room = self.rooms[conn_idx]
-                conn_rect = pygame.Rect(
-                    offset_x + conn_room.x * scale,
-                    offset_y + conn_room.y * scale,
-                    conn_room.width * scale,
-                    conn_room.height * scale
-                )
-                p1, p2 = closest_points_between_rects(room_rect, conn_rect)
-                pygame.draw.line(surface, (120, 180, 220), p1, p2, 2)
-
-        # Draw the rooms
-        font_size = max(10, int(12 * scale))
-        font = pygame.font.SysFont(None, font_size)
-
-        for i, room in rooms_to_draw.items():
-            room_rect = pygame.Rect(
-                offset_x + room.x * scale,
-                offset_y + room.y * scale,
-                room.width * scale,
-                room.height * scale
-            )
-
-            if i == current_idx:
-                color = (255, 220, 50)  # Current room
-            elif i == 0:
-                color = (50, 200, 80)   # Start room
-            elif not self.room_connections.get(i) or len(self.room_connections.get(i, [])) == 1:
-                color = (200, 100, 100)  # Dead end
+        # Show all ancestors (parents, grandparents, etc.) in the minimap as far as they fit
+        parent_chain = []
+        temp_idx = current_idx
+        max_steps = grid_size * grid_size  # never more than grid cells
+        for _ in range(max_steps):
+            parent = self.room_parent.get(temp_idx)
+            if parent is not None:
+                parent_chain.append((parent, temp_idx))
+                temp_idx = parent
             else:
-                color = (220, 220, 220)  # Default
+                break
 
-            pygame.draw.rect(surface, color, room_rect)
-            pygame.draw.rect(surface, (80, 80, 120), room_rect, 1)
+        # Place each parent in the grid if possible, following the chain
+        prev_center = center
+        for parent_idx, child_idx in parent_chain:
+            # Try to find which side parent is on relative to its child
+            side = None
+            opening_sides = self.room_opening_sides.get(child_idx, {})
+            if 'previous' in opening_sides:
+                side = opening_sides['previous']
+            if side in dir_offsets:
+                dr, dc = dir_offsets[side]
+                r, c = prev_center[0] + dr, prev_center[1] + dc
+                if 0 <= r < grid_size and 0 <= c < grid_size:
+                    if grid[r][c] is None:
+                        grid[r][c] = parent_idx
+                        prev_center = (r, c)
+                    else:
+                        break  # stop if cell is already filled
 
-            label = font.render(str(i), True, (30, 30, 30))
-            surface.blit(label, (room_rect.x + 2, room_rect.y + 2))
+        # Draw grid cells
+        font = pygame.font.SysFont(None, 18)
+        for r in range(grid_size):
+            for c in range(grid_size):
+                cell_rect = pygame.Rect(
+                    grid_origin_x + c * cell_size,
+                    grid_origin_y + r * cell_size,
+                    cell_size - 2,
+                    cell_size - 2
+                )
+                room_idx = grid[r][c]
+                if room_idx is not None and room_idx in self.rooms:
+                    if room_idx == current_idx:
+                        color = (255, 220, 50)  # Current room
+                    elif room_idx == 0:
+                        color = (50, 200, 80)   # Start room
+                    elif not self.room_connections.get(room_idx) or len(self.room_connections.get(room_idx, [])) == 1:
+                        color = (200, 100, 100)  # Dead end
+                    else:
+                        color = (220, 220, 220)  # Default
+                    pygame.draw.rect(surface, color, cell_rect)
+                    pygame.draw.rect(surface, (80, 80, 120), cell_rect, 1)
+                    label = font.render(str(room_idx), True, (30, 30, 30))
+                    surface.blit(label, (cell_rect.x + 2, cell_rect.y + 2))
+                else:
+                    pygame.draw.rect(surface, (60, 60, 80), cell_rect)
+                    pygame.draw.rect(surface, (80, 80, 120), cell_rect, 1)
+
+        # Draw grid lines
+        for i in range(grid_size + 1):
+            pygame.draw.line(surface, (100, 100, 140),
+                             (grid_origin_x, grid_origin_y + i * cell_size),
+                             (grid_origin_x + grid_size * cell_size, grid_origin_y + i * cell_size), 1)
+            pygame.draw.line(surface, (100, 100, 140),
+                             (grid_origin_x + i * cell_size, grid_origin_y),
+                             (grid_origin_x + i * cell_size, grid_origin_y + grid_size * cell_size), 1)
