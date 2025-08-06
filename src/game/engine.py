@@ -7,11 +7,13 @@ import math
 from game.player import Player
 from game.dungeon import Dungeon
 from game.util.light import render_volumetric_light
+from game.util.ui import Button
 
 class GameEngine:
     # Track previous room index for rendering
     def __init__(self, width=800, height=600, title="Dungeon Crawler", fullscreen=True):
         pygame.init()
+        self.mouse_attack_held = False  # Track if mouse attack button is held
         
         # Configurar fullscreen
         if fullscreen:
@@ -63,6 +65,11 @@ class GameEngine:
 
         # Collision rects debug
         self.show_collision_rects = False
+        # --- GLOBAL PROJECTILES LIST ---
+        import builtins
+        if not hasattr(builtins, 'projectiles') or not isinstance(builtins.projectiles, list):
+            builtins.projectiles = []
+        self.projectiles = builtins.projectiles
 
     def add_light_source(self, x, y, radius, intensity=255):
         self.light_sources.append({
@@ -130,31 +137,80 @@ class GameEngine:
         self.camera_x += (target_camera_x - self.camera_x) * self.camera_smoothing
         self.camera_y += (target_camera_y - self.camera_y) * self.camera_smoothing
 
+    def run_pause_menu(self):
+        button_resume = Button("Resume", (self.width//2 - 150, self.height//2 - 60, 300, 60), action=None)
+        button_quit = Button("Quit", (self.width//2 - 150, self.height//2 + 20, 300, 60), action=None)
+        
+        def resume():
+            nonlocal running_pause
+            running_pause = False
+        
+        def quit_game():
+            nonlocal running_pause
+            self.running = False
+            running_pause = False
+        
+        button_resume.action = resume
+        button_quit.action = quit_game
+        
+        running_pause = True
+        
+        # Create a semi-transparent surface for overlay once
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        overlay.fill((10, 10, 10, 10))  # last value is alpha (0-255), 150 ~ semi-transparent
+        
+        font = pygame.font.Font(None, 72)
+        text_surf = font.render("I I", True, (255, 255, 255))
+        text_rect = text_surf.get_rect(center=(self.width//2, self.height//2 - 150))
+        
+        while running_pause:
+            self.clock.tick(60)
+            mouse_pos = pygame.mouse.get_pos()
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    running_pause = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running_pause = False
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    button_resume.click(mouse_pos)
+                    button_quit.click(mouse_pos)
+            
+            # Instead of filling, blit the semi-transparent overlay
+            self.screen.blit(overlay, (0, 0))
+            
+            button_resume.draw(self.screen, mouse_pos)
+            button_quit.draw(self.screen, mouse_pos)
+
+            self.screen.blit(text_surf, text_rect)
+            pygame.display.flip()
+
     def handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
-                    self.running = False
-                elif event.key == pygame.K_SPACE:
-                    # Space key is no longer needed for opening transitions
-                    print("[INFO] Walk through openings in walls to change rooms!")
-                elif event.key == pygame.K_F11:
-                    # Toggle fullscreen
-                    self._toggle_fullscreen()
-                elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
-                    # Zoom in
-                    self.zoom = min(self.zoom * 1.2, 5.0)
-                elif event.key == pygame.K_MINUS:
-                    # Zoom out
-                    self.zoom = max(self.zoom / 1.2, 0.5)
+                    # Quando apertar ESC, abrir o menu pause
+                    self.run_pause_menu()
                 elif event.key == pygame.K_F3:
-                    # Toggle FPS monitor
                     self.show_fps = not self.show_fps
                 elif event.key == pygame.K_F4:
-                    # Toggle collision rects debug
                     self.show_collision_rects = not self.show_collision_rects
+
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self.mouse_attack_held = True
+                # Ensure we pass the projectiles list
+                self.player.attack(
+                    self.camera_x, 
+                    self.camera_y, 
+                    self.zoom, 
+                    self.projectiles  # This is the critical parameter
+                )
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self.mouse_attack_held = False
 
     def update(self):
         current_index = self.dungeon.current_room_index
@@ -164,6 +220,9 @@ class GameEngine:
         self.player.update(rooms=adjacent_rooms)
 
         # update room based on player position (bounding box detection)
+        if self.mouse_attack_held:
+            if self.player.attack(self.camera_x, self.camera_y, self.zoom):
+                print("Ataque executado!")
         prev_room_index = self.dungeon.current_room_index
         self.dungeon.update_player_room(self.player.rect)
         if self.dungeon.current_room_index != prev_room_index:
@@ -178,6 +237,19 @@ class GameEngine:
 
         # update camera to follow player
         self._update_camera()
+        # --- UPDATE PROJECTILES ---
+        dt = self.clock.get_time() / 1000.0  # seconds
+        current_room = self.dungeon.get_current_room()
+        enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
+        # Get wall rects for the current room
+        wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
+        # Get room boundary as a pygame.Rect
+        room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
+        for proj in self.projectiles[:]:
+            proj.update(dt, enemies, wall_rects, room_rect)
+            if not getattr(proj, 'is_alive', True):
+                print("Removing dead projectile")  # Debug removal
+                self.projectiles.remove(proj)
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
@@ -240,7 +312,6 @@ class GameEngine:
         for room in rooms_to_render:
             room.render(virtual_surface, self.camera_x, self.camera_y, 
                     show_collision_rects=self.show_collision_rects)
-            
 
         # Render the player
         self.player.render(
@@ -248,8 +319,13 @@ class GameEngine:
             self.camera_x,
             self.camera_y,
             rooms_to_render,
+            zoom=self.zoom,
             show_collision_rects=self.show_collision_rects
         )
+
+        # --- RENDER PROJECTILES ---
+        for proj in self.projectiles:
+            proj.render(virtual_surface, self.camera_x, self.camera_y, self.zoom)
 
         # --- DARKNESS OVERLAY ---
         darkness_overlay = pygame.Surface((virtual_width, virtual_height), pygame.SRCALPHA)
@@ -274,7 +350,22 @@ class GameEngine:
             current_room.width,
             current_room.height
         )
-        darkness_overlay.fill((0, 0, 0, 0), floor_screen_rect)
+
+        
+        wall_rects = []
+        for wall in current_room.get_wall_rects():
+            screen_wall = pygame.Rect(
+                wall.x - self.camera_x,
+                wall.y - self.camera_y,
+                wall.width,
+                wall.height
+            )
+            wall_rects.append(screen_wall)
+
+        # Fill the union of all wall rects as a single region
+        if wall_rects:
+            union_rect = wall_rects[0].unionall(wall_rects[1:])
+            darkness_overlay.fill((0, 0, 0, 0), union_rect)
         
         player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
         player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
@@ -288,16 +379,6 @@ class GameEngine:
         player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
 
         # Collect wall rects in screen space (if needed for future light logic)
-        wall_rects = []
-        for room in rooms_to_render:
-            for wall in room.get_wall_rects():
-                screen_wall = pygame.Rect(
-                    wall.x - self.camera_x,
-                    wall.y - self.camera_y,
-                    wall.width,
-                    wall.height
-                )
-                wall_rects.append(screen_wall)
 
         # Apply darkness overlay to scene
         virtual_surface.blit(darkness_overlay, (0, 0), special_flags=pygame.BLEND_PREMULTIPLIED)
@@ -309,6 +390,8 @@ class GameEngine:
 
         # Render UI (always on top)
         self.dungeon.render_ui(self.screen)
+        self.player.render_bars(self.screen, self.screen.get_height())  # top-left corner HUD bars
+        self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())  # top-right corner weapon HUD
 
         # FPS monitor
         if self.show_fps:
@@ -316,8 +399,8 @@ class GameEngine:
             playerPos = self.player.x, self.player.y
             fps_text = self.fps_font.render(f"FPS: {fps:.1f}", True, (255, 255, 0))
             playerPos_text = self.fps_font.render(f"Player Pos: {playerPos}", True, (255, 255, 0))
-            self.screen.blit(fps_text, (10, 10))
-            self.screen.blit(playerPos_text, (10, 30))
+            self.screen.blit(fps_text, (10, self.screen.get_height() - fps_text.get_height() - 10))
+            self.screen.blit(playerPos_text, (10,  self.screen.get_height() - fps_text.get_height() - 30))
 
         pygame.display.flip()
 

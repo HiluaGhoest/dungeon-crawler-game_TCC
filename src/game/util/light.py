@@ -135,7 +135,7 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     
     # Add rays for volumetric effect (more subtle)
     if performance_mode != "fast":
-        rays = 16 if performance_mode == "balanced" else 24  # Reduced ray count
+        rays = 1 if performance_mode == "balanced" else 1  # Reduced ray count
         ray_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
         for i in range(rays):
             angle = 2 * math.pi * i / rays + random.uniform(-0.1, 0.1)

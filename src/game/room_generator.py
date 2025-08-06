@@ -3,6 +3,7 @@ import random
 import math
 import heapq
 from game.room import Room
+from game.weapons import DoublePistol, Pistol, Weapon, Steel_Sword
 
 class RoomGenerator:
     """Gerador de salas com formatos aleatórios."""
@@ -10,7 +11,7 @@ class RoomGenerator:
     def __init__(self, tile_size=20):
         self.tile_size = tile_size
 
-    def generate_rectangular_room(self, x, y, min_width=12, max_width=25, min_height=12, max_height=20, allow_islands=True, allow_subrooms=True, is_first_room=False):
+    def generate_rectangular_room(self, x, y, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False):
         """Gera uma sala retangular simples."""
         width = random.randint(min_width, max_width) * self.tile_size
         height = random.randint(min_height, max_height) * self.tile_size
@@ -19,9 +20,23 @@ class RoomGenerator:
         room = TiledRoom(x, y, width, height, self.tile_size)
         return room
     
+    def generate_first_room(self, x, y, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False):
+        """Gera uma sala retangular simples."""
+        width = random.randint(min_width, max_width) * self.tile_size
+        height = random.randint(min_height, max_height) * self.tile_size
+        print(f"[ROOM] Gerando sala retangular: {width//self.tile_size}x{height//self.tile_size} tiles (first_room: {is_first_room})")
+        
+        room = TiledRoom(x, y, width, height, self.tile_size)
+
+        if is_first_room:
+            room.add_pillars_in_circle(count=8)
+
+        return room
+
+    
     def generate_l_shaped_room(self, x, y):
         """Gera uma sala em formato de L."""
-        main_width = random.randint(12, 18) * self.tile_size
+        main_width = random.randint(12, 32) * self.tile_size
         main_height = random.randint(22, 22) * self.tile_size
         
         ext_width = random.randint(8, 15) * self.tile_size
@@ -62,6 +77,68 @@ class RoomGenerator:
         
         print(f"[ROOM] Selecionado tipo: {room_names[chosen_index]}")
         return room_type(x, y)
+    
+class Pillar:
+    def __init__(self, x, y, tile_size, weapon=None, toggleable=True):
+        self.rect = pygame.Rect(x, y, tile_size * 2, tile_size * 2)
+        self.weapon = weapon      # arma que o pilar tem
+        self.original_weapon = weapon  # usada para restaurar se for toggle
+        self.toggleable = toggleable   # se True, a arma volta pro pilar quando trocada
+        self.interacted = False
+
+    def interact(self, player):
+        # Se o pilar não tem arma, e o jogador tem uma, e o pilar aceita toggle, devolve a arma
+        if self.weapon is None and self.toggleable and player.weapon and player.weapon_origin is self:
+            self.weapon = player.weapon
+            player.weapon = None
+            player.weapon_origin = None
+            print(f"[PILLAR] {self.weapon.name} devolvida ao pilar.")
+            return
+
+        # Se o pilar tem arma e o jogador não tem
+        if self.weapon and not player.weapon:
+            player.weapon = self.weapon
+            player.weapon_origin = self if self.toggleable else None
+            print(f"[PILLAR] {self.weapon.name} pega pelo jogador.")
+            self.weapon = None
+            return
+
+        # Se o jogador já tem arma e esse pilar tem outra
+        if self.weapon and player.weapon and self.weapon != player.weapon:
+            if self.toggleable and player.weapon_origin:
+                # Devolve a arma atual para o pilar de origem
+                player.weapon_origin.weapon = player.weapon
+            player.weapon = self.weapon
+            player.weapon_origin = self if self.toggleable else None
+            print(f"[PILLAR] Arma trocada: agora o jogador tem {player.weapon.name}")
+            self.weapon = None
+
+    def render(self, surface, camera_x=0, camera_y=0, zoom=1.0):
+        # Only render the weapon, not the pillar itself
+        render_rect = self.rect.move(-camera_x, -camera_y)
+        weapon_render_rect = render_rect.move(0, -32)
+        if self.weapon:
+            center = weapon_render_rect.center
+            self.weapon.render_static(surface, center, camera_x, camera_y, zoom)
+
+class DustParticle:
+    def __init__(self, x, y, size=None):
+        self.x = x
+        self.y = y
+        self.size = size if size else random.randint(1, 3)
+        self.color = (
+            random.randint(180, 220),
+            random.randint(180, 200),
+            random.randint(150, 180)
+        )
+        self.alpha = random.randint(50, 150)
+        
+    def render(self, surface, camera_x=0, camera_y=0):
+        render_x = self.x - camera_x
+        render_y = self.y - camera_y
+        s = pygame.Surface((self.size, self.size), pygame.SRCALPHA)
+        s.fill((*self.color, self.alpha))
+        surface.blit(s, (render_x, render_y))
 
 class TiledRoom(Room):
     """Sala base usando sistema de tiles."""
@@ -74,12 +151,56 @@ class TiledRoom(Room):
         self.height = height
         self.wall_color = (60, 55, 70)  # Muted dark gray with purple undertones
         self.floor_color = (20, 18, 28)  # Very dark gray/black with a subtle purple tint
+        self.pillar_tiles = []  # <-- pilares
+        self.dust_particles = []
 
         self.wall_tiles = self._generate_wall_tiles()
+
         self.decorations = []
         self._add_concave_corner_fillers()
+        self._generate_dust_particles()
+        
         
 
+    def _generate_dust_particles(self):
+        """Generate random dust particles on floor tiles"""
+        dust_count = random.randint(20, 50)  # Adjust count as needed
+        
+        for _ in range(dust_count):
+            # Random position within room bounds (excluding walls)
+            x = self.x + random.randint(self.tile_size, self.width - 2*self.tile_size)
+            y = self.y + random.randint(self.tile_size, self.height - 2*self.tile_size)
+            
+            # Only add if it's actually on a floor tile
+            if self.is_floor_tile(x, y):
+                self.dust_particles.append(DustParticle(x, y))
+
+    def add_pillars_in_circle(self, count=8):
+        import math
+        import random
+
+        available_weapons = [Steel_Sword, Pistol, DoublePistol]  # Add more weapon classes here as needed
+
+        center_x = self.x + self.width // 2
+        center_y = self.y + self.height // 2
+        radius = min(self.width, self.height) // 3
+
+        for i in range(count):
+            angle = (2 * math.pi / count) * i
+            px = center_x + int(radius * math.cos(angle))
+            py = center_y + int(radius * math.sin(angle))
+
+            tile_x = (px // self.tile_size) * self.tile_size
+            tile_y = (py // self.tile_size) * self.tile_size
+
+            has_weapon = random.choice([True, False])
+
+            weapon = random.choice(available_weapons)() if has_weapon else None
+
+            pillar = Pillar(tile_x, tile_y, self.tile_size, weapon=weapon, toggleable=True)
+            self.pillar_tiles.append(pillar)
+
+            
     def _generate_wall_tiles(self):
         """Gera tiles individuais para as paredes."""
         tiles = []
@@ -117,6 +238,16 @@ class TiledRoom(Room):
             for tile in self.original_wall_tiles:
                 tile['rect'].x += dx
                 tile['rect'].y += dy
+        
+        # Shift dust particles
+        for dust in self.dust_particles:
+            dust.x += dx
+            dust.y += dy
+            
+        # Shift pillars
+        for pillar in self.pillar_tiles:
+            pillar.rect.x += dx
+            pillar.rect.y += dy
                 
     def _get_tile_type(self, tx, ty, width, height):
         """Determina o tipo de tile baseado na posição na grade."""
@@ -223,6 +354,13 @@ class TiledRoom(Room):
                 rect = tile['rect']
                 debug_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
                 pygame.draw.rect(surface, (255, 0, 0), debug_rect, 2)
+        
+        for pillar in self.pillar_tiles:
+            pillar.render(surface, camera_x, camera_y)
+
+        for dust in self.dust_particles:
+            dust.render(surface, camera_x, camera_y)
+
 
 
 
@@ -236,8 +374,26 @@ class LShapedRoom(TiledRoom):
         self.ext_height = ext_height
         total_width = main_width + ext_width
         total_height = main_height
+        self.pillar_tiles = []  # <-- Aqui guardaremos os pilares
         super().__init__(x, y, total_width, total_height, tile_size)
     
+    def _generate_dust_particles(self):
+        """Generate random dust particles on floor tiles for L-shaped room"""
+        dust_count = random.randint(30, 70)  # More dust for larger rooms
+        
+        l_rects = self._get_l_rectangles()
+        for _ in range(dust_count):
+            # Choose a random rectangle (main or extension)
+            rect = random.choice(l_rects)
+            
+            # Random position within the chosen rectangle (excluding walls)
+            x = rect.x + random.randint(self.tile_size, rect.width - 2*self.tile_size)
+            y = rect.y + random.randint(self.tile_size, rect.height - 2*self.tile_size)
+            
+            # Only add if it's actually on a floor tile
+            if self.is_floor_tile(x, y):
+                self.dust_particles.append(DustParticle(x, y))
+
     def _generate_wall_tiles(self):
         """Gera tiles para uma sala em formato de L."""
         tiles = []
@@ -381,3 +537,5 @@ class LShapedRoom(TiledRoom):
                 debug_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
                 pygame.draw.rect(surface, (255, 0, 0), debug_rect, 2)
 
+        for dust in self.dust_particles:
+            dust.render(surface, camera_x, camera_y)

@@ -49,8 +49,8 @@ class Dungeon:
         }
 
         # Create first room
-        first_room = self.room_generator.generate_rectangular_room(
-            0, 0, min_width=12, max_width=18, min_height=12, max_height=16,
+        first_room = self.room_generator.generate_first_room(
+            0, 0, min_width=32, max_width=32, min_height=32, max_height=32,
             is_first_room=True
         )
         self.rooms[0] = first_room
@@ -1468,24 +1468,6 @@ class Dungeon:
         """Render UI elements like room counter and map."""
         font = pygame.font.Font(None, 36)
         small_font = pygame.font.Font(None, 24)
-        
-        # Room progress
-        progress_text = f"Room {self.current_room_index + 1}/{self.total_rooms}"
-        text_surface = font.render(progress_text, True, (255, 255, 255))
-        surface.blit(text_surface, (20, 20))
-        
-        # Depth indicator
-        depth = self.room_depth.get(self.current_room_index, 0)
-        depth_text = f"Depth: {depth}"
-        depth_surface = small_font.render(depth_text, True, (200, 200, 200))
-        surface.blit(depth_surface, (20, 60))
-        
-        # Show connections
-        if self.current_room_index in self.room_connections:
-            connections = len(self.room_connections[self.current_room_index])
-            conn_text = f"Paths: {connections}"
-            conn_surface = small_font.render(conn_text, True, (180, 220, 180))
-            surface.blit(conn_surface, (20, 90))
         
         # Show mini-map
         self._render_mini_map(surface)
