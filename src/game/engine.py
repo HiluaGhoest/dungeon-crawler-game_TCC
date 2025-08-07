@@ -485,7 +485,7 @@ class GameEngine:
                 self.projectiles.remove(proj)
         # --- UPDATE ENEMIES ---
         for enemy in enemies:
-            enemy.update()
+            enemy.update(self.dt, player_pos=(self.player.x, self.player.y))
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
