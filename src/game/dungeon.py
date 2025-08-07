@@ -2,6 +2,7 @@ import pygame
 import random
 from collections import defaultdict, deque
 from game.room_generator import RoomGenerator
+from game.enemy import Enemy
 
 
 class Dungeon:
@@ -29,6 +30,7 @@ class Dungeon:
         self.room_parent = {}       # Tracks parent-child relationships
         self.room_depth = {}        # Tracks depth from start room
         self.occupied_positions = set()
+        self.visited_rooms = set()  # Track rooms player has visited
 
         # Generate all rooms at their final positions
         self._generate_and_position_rooms()
@@ -36,6 +38,7 @@ class Dungeon:
         # Reset to first room after generation
         self.current_room_index = 0
         self.previous_room_index = None
+        self.visited_rooms.add(0)  # Mark first room as visited
     
     def _generate_and_position_rooms(self):
         """Generate and position all rooms of the dungeon with branching paths."""
@@ -138,7 +141,8 @@ class Dungeon:
                     room_queue.append(child_idx)
                     visited.add(child_idx)
 
-
+                    # Criar inimigos na sala filha
+                    self.spawn_enemies_in_room(child_idx, num_enemies=self.room_depth[child_idx] * 2)
 
         print(f"[DUNGEON] Created {rooms_created} rooms with branching structure")
         print(f"Room connections: {self.room_connections}")
@@ -350,7 +354,7 @@ class Dungeon:
                 opening_sides['previous'] = self._get_opposite_side(parent_side)
                 print(f"[OPENING_SIDES] Setting previous opening to opposite: {self._get_opposite_side(parent_side)} (parent side: {parent_side})")
 
-        # Finally, persist the computed sides
+        # Finalmente, persista os lados abertos calculados
         self.room_opening_sides.setdefault(self.current_room_index, {}).update(opening_sides)
         print(f"[OPENING_SIDES] Final opening sides for room {self.current_room_index}: {opening_sides}")
         return opening_sides
@@ -1067,6 +1071,7 @@ class Dungeon:
                     self.previous_room_index = self.current_room_index
                     self.current_room_index = room_idx
                     self.last_transition_time = now
+                    self.visited_rooms.add(room_idx)  # Mark room as visited
                 break
 
 
@@ -1294,30 +1299,24 @@ class Dungeon:
         )
 
     def render(self, surface, camera_x=0, camera_y=0, show_collision_rects=False):
-        """Render current room and adjacent rooms."""
-        # Render current room
-        self.get_current_room().render(surface, camera_x, camera_y, show_collision_rects=show_collision_rects)
-
-        # Render adjacent rooms
-        if self.current_room_index in self.room_connections:
-            for connected_idx in self.room_connections[self.current_room_index]:
-                self.rooms[connected_idx].render(surface, camera_x, camera_y, show_collision_rects=show_collision_rects)
-
+        """Render current and adjacent rooms using cached surfaces."""
+        rooms_to_render = self.get_adjacent_rooms(self.current_room_index)
+        for room in rooms_to_render:
+            if hasattr(room, 'render'):
+                room.render(surface, camera_x, camera_y, show_collision_rects)
         # Draw opening rects if debug enabled
         if show_collision_rects:
-            # Draw all opening rects for current room
             room_index = self.current_room_index
             room = self.rooms[room_index]
             for opening in getattr(room, 'opening_triggers', []):
                 pygame.draw.rect(surface, (255, 0, 0), opening['rect'].move(-camera_x, -camera_y), 2)
-            
-            # Draw trigger rects for openings
             for trigger_rect, opening_type in self.get_opening_trigger_rects(camera_x, camera_y):
-                color = (255, 0, 0)  # Red for trigger rects
+                color = (255, 0, 0)
                 pygame.draw.rect(surface, color, trigger_rect, 2)
                 
                 # Draw opening type text
-                font = pygame.font.Font(None, 24)
+                from game.assets import get_font
+                font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 24)
                 text = font.render(opening_type, True, (255, 255, 255))
                 surface.blit(text, (trigger_rect.x, trigger_rect.y - 20))
 
@@ -1466,8 +1465,9 @@ class Dungeon:
     
     def render_ui(self, surface):
         """Render UI elements like room counter and map."""
-        font = pygame.font.Font(None, 36)
-        small_font = pygame.font.Font(None, 24)
+        from game.assets import get_font
+        font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 36)
+        small_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 24)
         
         # Show mini-map
         self._render_mini_map(surface)
@@ -1481,8 +1481,11 @@ class Dungeon:
 
         # Draw map background
         map_bg = pygame.Rect(map_x, map_y, map_size, map_size)
-        pygame.draw.rect(surface, (40, 40, 60), map_bg)
-        pygame.draw.rect(surface, (100, 100, 140), map_bg, 2)
+        # Use BTN_COLOR and border_color from UI theme
+        BTN_COLOR = (40, 40, 40)
+        BORDER_COLOR = (255, 255, 255)
+        pygame.draw.rect(surface, BTN_COLOR, map_bg)
+        pygame.draw.rect(surface, BORDER_COLOR, map_bg, 2)
 
         grid_size = 3
         cell_size = (map_size - 20) // grid_size
@@ -1570,28 +1573,82 @@ class Dungeon:
                     cell_size - 2
                 )
                 room_idx = grid[r][c]
-                if room_idx is not None and room_idx in self.rooms:
+                # Only show rooms that have been visited
+                if room_idx is not None and room_idx in self.rooms and room_idx in self.visited_rooms:
                     if room_idx == current_idx:
-                        color = (255, 220, 50)  # Current room
+                        color = (220, 220, 60)  # Current room (yellow highlight)
                     elif room_idx == 0:
-                        color = (50, 200, 80)   # Start room
+                        color = (50, 200, 80)   # Start room (green)
                     elif not self.room_connections.get(room_idx) or len(self.room_connections.get(room_idx, [])) == 1:
-                        color = (200, 100, 100)  # Dead end
+                        color = (200, 100, 100)  # Dead end (red)
                     else:
-                        color = (220, 220, 220)  # Default
+                        color = (80, 80, 80)  # Default visited (dark gray)
                     pygame.draw.rect(surface, color, cell_rect)
-                    pygame.draw.rect(surface, (80, 80, 120), cell_rect, 1)
-                    label = font.render(str(room_idx), True, (30, 30, 30))
-                    surface.blit(label, (cell_rect.x + 2, cell_rect.y + 2))
+                    pygame.draw.rect(surface, BORDER_COLOR, cell_rect, 1)
+                    # Hide room number for a cleaner look
                 else:
-                    pygame.draw.rect(surface, (60, 60, 80), cell_rect)
-                    pygame.draw.rect(surface, (80, 80, 120), cell_rect, 1)
+                    pygame.draw.rect(surface, (30, 30, 30), cell_rect)
+                    pygame.draw.rect(surface, BORDER_COLOR, cell_rect, 1)
 
         # Draw grid lines
         for i in range(grid_size + 1):
-            pygame.draw.line(surface, (100, 100, 140),
+            pygame.draw.line(surface, BORDER_COLOR,
                              (grid_origin_x, grid_origin_y + i * cell_size),
                              (grid_origin_x + grid_size * cell_size, grid_origin_y + i * cell_size), 1)
-            pygame.draw.line(surface, (100, 100, 140),
+            pygame.draw.line(surface, BORDER_COLOR,
                              (grid_origin_x + i * cell_size, grid_origin_y),
                              (grid_origin_x + i * cell_size, grid_origin_y + grid_size * cell_size), 1)
+
+    def spawn_enemies_in_room(self, room_idx, num_enemies, enemy_classes=None):
+        """Spawn enemies in a specific room at random positions."""
+        room = self.rooms.get(room_idx)
+        if room is None:
+            return
+
+        room.enemies = []  # Clear existing enemies
+
+        # Use provided enemy classes or default to [Enemy]
+        if enemy_classes is None:
+            enemy_classes = [Enemy]
+        # Get size from first class (assume all have same size, or adapt as needed)
+        enemy_size = enemy_classes[0](0, 0)._get_rect().width
+
+        def is_valid_enemy_spawn(room, x, y, size):
+            enemy_rect = pygame.Rect(x, y, size, size)
+            points = [
+                (x, y),
+                (x + size - 1, y),
+                (x, y + size - 1),
+                (x + size - 1, y + size - 1),
+                (x + size // 2, y + size // 2),
+                (x + size // 2, y),
+                (x + size // 2, y + size - 1),
+                (x, y + size // 2),
+                (x + size - 1, y + size // 2)
+            ]
+            if not all(hasattr(room, 'is_floor_tile') and room.is_floor_tile(px, py) for px, py in points):
+                return False
+            if hasattr(room, 'wall_tiles'):
+                for tile in room.wall_tiles:
+                    if enemy_rect.colliderect(tile['rect']):
+                        return False
+            return True
+
+        for i in range(num_enemies):
+            attempts = 0
+            max_attempts = 100
+            enemy_cls = random.choice(enemy_classes)
+            while attempts < max_attempts:
+                spawn_x = room.x + random.randint(enemy_size, max(enemy_size, room.width - enemy_size))
+                spawn_y = room.y + random.randint(enemy_size, max(enemy_size, room.height - enemy_size))
+                if is_valid_enemy_spawn(room, spawn_x, spawn_y, enemy_size):
+                    room.enemies.append(enemy_cls(spawn_x, spawn_y))
+                    print(f"[SPAWN] Spawned {enemy_cls.__name__} {i} in room {room_idx} at ({spawn_x}, {spawn_y})")
+                    break
+                attempts += 1
+            else:
+                center_x = room.x + room.width // 2
+                center_y = room.y + room.height // 2
+                room.enemies.append(enemy_cls(center_x, center_y))
+                print(f"[SPAWN] Fallback {enemy_cls.__name__} {i} in room {room_idx} at ({center_x}, {center_y})")
+        print(f"[SPAWN] Room {room_idx} (depth {self.room_depth.get(room_idx, 0)}) has {len(room.enemies)} enemies.")

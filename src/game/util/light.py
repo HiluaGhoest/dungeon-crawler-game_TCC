@@ -4,10 +4,11 @@ import random
 import time
 
 
-# Global performance settings
 PERFORMANCE_MODE = "balanced"  # "fast", "balanced", "quality"
 _light_time = 0
 LIGHT_MASK_CACHE = {}
+# Cache for light surfaces: key = (radius, color, breathing_intensity, flicker_intensity, performance_mode)
+LIGHT_SURFACE_CACHE = {}
 
 def get_cached_light_mask(radius, performance_mode):
     key = (radius, performance_mode)
@@ -87,52 +88,65 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
                            flicker_intensity=0.08, wall_rects=None, performance_mode=None):
     global _light_time
     _light_time += 0.016  # ~60 FPS
-    
+
     if performance_mode is None:
         performance_mode = PERFORMANCE_MODE
-        
+
     # Breathing effect - affects intensity, not size
     breathing_offset = math.cos(_light_time * 1.2) * breathing_intensity  # Use cos for smoother start
-    
+
     # Flicker effect - affects intensity
     flicker_base = math.sin(_light_time * 6.0) * 0.3 + 0.7  # Smooth base wave
     flicker_noise = (random.random() * 0.4 + 0.8)  # Less random variation
     flicker_offset = flicker_base * flicker_noise * flicker_intensity
-    
-    # Use a slightly larger radius for the surface to prevent black holes
-    surface_radius = radius + 10  # Always 10 pixels larger than requested
-    effective_radius = surface_radius  # Surface size stays constant
-    
+
+    # Optimize surface size: only as large as needed for visible area
+    # If wall_rects is present, find bounding box of all relevant walls and light
+    if wall_rects and len(wall_rects) > 0:
+        min_x = min([w.x for w in wall_rects] + [px])
+        max_x = max([w.x + w.width for w in wall_rects] + [px])
+        min_y = min([w.y for w in wall_rects] + [py])
+        max_y = max([w.y + w.height for w in wall_rects] + [py])
+        width = max_x - min_x + 20
+        height = max_y - min_y + 20
+        light_size = max(width, height, (radius + 10) * 2)
+        offset_x = px - light_size // 2
+        offset_y = py - light_size // 2
+    else:
+        light_size = (radius + 10) * 2
+        offset_x = px - (radius + 10)
+        offset_y = py - (radius + 10)
+    effective_radius = light_size // 2
+
     # Calculate intensity multiplier instead of changing radius
     intensity_multiplier = 1.0 + breathing_offset + (flicker_offset * 0.3)
     intensity_multiplier = max(0.6, min(1.4, intensity_multiplier))  # Clamp between 60% and 140%
-    
+
     # Apply intensity to color
     adjusted_color = (
         min(255, int(color[0] * intensity_multiplier)),
         min(255, int(color[1] * intensity_multiplier)),
         min(255, int(color[2] * intensity_multiplier))
     )
-    
-    # Create light surface with fixed size
-    light_size = effective_radius * 2
+
+    # Do NOT cache the full light surface, only cache the base mask
     light_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
     rays_only_surface = None
     
     # ====== CACHED LIGHT MASK SECTION ======
     # Get cached base mask (grayscale)
     base_mask = get_cached_light_mask(effective_radius, performance_mode)
-    
+
     # Create a tinted version of the mask
     tinted_mask = base_mask.copy()
     color_surf = pygame.Surface(tinted_mask.get_size(), pygame.SRCALPHA)
     color_surf.fill(adjusted_color)
     tinted_mask.blit(color_surf, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
     # ====== END CACHED SECTION ======
-    
+
     # Draw the base light
     light_surface.blit(tinted_mask, (0, 0))
-    
+
     # Add rays for volumetric effect (more subtle)
     if performance_mode != "fast":
         rays = 1 if performance_mode == "balanced" else 1  # Reduced ray count
@@ -160,6 +174,8 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
         rays_only_surface = ray_surface.copy()
         # Use normal blending instead of additive for subtler effect
         light_surface.blit(ray_surface, (0, 0), special_flags=pygame.BLEND_ALPHA_SDL2)
+
+    # No storing in cache for full light surface
     
     # Handle wall shadows with optimization for large numbers of walls
     if wall_rects:
@@ -214,8 +230,8 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     # Draw light to main surface
     if surface is not None:
         surface.blit(
-            light_surface, 
-            (px - effective_radius, py - effective_radius),
+            light_surface,
+            (offset_x, offset_y),
             special_flags=pygame.BLEND_RGBA_ADD
         )
     # Optionally return rays_only_surface for masking
@@ -274,13 +290,22 @@ def create_cinematic_torch(surface, px, py, radius=150, wall_rects=None):
 
 def create_soft_player_light(surface, px, py, radius=180, wall_rects=None, return_light_surface=False, return_rays_surface=False):
     """Create a soft, ambient light suitable for the player. If return_light_surface is True, returns the light surface instead of drawing it."""
+    # Limit wall_rects to only those near the player for performance and exclude walls containing the light source
+    filtered_walls = None
+    if wall_rects:
+        max_distance_sq = (radius + 15) ** 2  # Only consider walls within radius
+        filtered_walls = [
+            w for w in wall_rects
+            if (w.x + w.width // 2 - px) ** 2 + (w.y + w.height // 2 - py) ** 2 < max_distance_sq
+            and not w.collidepoint(px, py)  # Exclude walls containing the light source
+        ]
     if not return_light_surface and not return_rays_surface:
         return render_volumetric_light(
             surface, px, py, radius,
             color=(75, 75, 75),  # Dimmer, more transparent light
             breathing_intensity=0.05,  # Subtle breathing
             flicker_intensity=0.3,   # Reduced flicker
-            wall_rects=wall_rects,
+            wall_rects=filtered_walls,
             performance_mode="balanced"
         )
     else:
@@ -292,7 +317,7 @@ def create_soft_player_light(surface, px, py, radius=180, wall_rects=None, retur
             color=(100, 100, 70),
             breathing_intensity=0.05,
             flicker_intensity=0.3,
-            wall_rects=wall_rects,
+            wall_rects=filtered_walls,
             performance_mode="balanced"
         )
         if return_rays_surface:

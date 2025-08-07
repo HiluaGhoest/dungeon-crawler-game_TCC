@@ -3,7 +3,9 @@ import random
 import math
 import heapq
 from game.room import Room
-from game.weapons import DoublePistol, Pistol, Weapon, Steel_Sword
+from game.weapons.weapon import Weapon
+from game.weapons.ranged_weapons import Pistol, DoublePistol
+from game.weapons.melee_weapons import SteelSword
 
 class RoomGenerator:
     """Gerador de salas com formatos aleatórios."""
@@ -87,13 +89,7 @@ class Pillar:
         self.interacted = False
 
     def interact(self, player):
-        # Se o pilar não tem arma, e o jogador tem uma, e o pilar aceita toggle, devolve a arma
-        if self.weapon is None and self.toggleable and player.weapon and player.weapon_origin is self:
-            self.weapon = player.weapon
-            player.weapon = None
-            player.weapon_origin = None
-            print(f"[PILLAR] {self.weapon.name} devolvida ao pilar.")
-            return
+        # Não é mais possível devolver armas ao pilar
 
         # Se o pilar tem arma e o jogador não tem
         if self.weapon and not player.weapon:
@@ -105,9 +101,8 @@ class Pillar:
 
         # Se o jogador já tem arma e esse pilar tem outra
         if self.weapon and player.weapon and self.weapon != player.weapon:
-            if self.toggleable and player.weapon_origin:
-                # Devolve a arma atual para o pilar de origem
-                player.weapon_origin.weapon = player.weapon
+            # Drop the player's current weapon instead of returning to pillar
+            player.drop_weapon()
             player.weapon = self.weapon
             player.weapon_origin = self if self.toggleable else None
             print(f"[PILLAR] Arma trocada: agora o jogador tem {player.weapon.name}")
@@ -159,8 +154,9 @@ class TiledRoom(Room):
         self.decorations = []
         self._add_concave_corner_fillers()
         self._generate_dust_particles()
-        
-        
+
+        self.cached_surface = None
+        self._cache_room_surface()
 
     def _generate_dust_particles(self):
         """Generate random dust particles on floor tiles"""
@@ -176,10 +172,13 @@ class TiledRoom(Room):
                 self.dust_particles.append(DustParticle(x, y))
 
     def add_pillars_in_circle(self, count=8):
+
         import math
         import random
 
-        available_weapons = [Steel_Sword, Pistol, DoublePistol]  # Add more weapon classes here as needed
+        available_weapons = [SteelSword, Pistol, DoublePistol]  # Add more weapon classes here as needed
+        weapon_types = available_weapons.copy()
+        random.shuffle(weapon_types)
 
         center_x = self.x + self.width // 2
         center_y = self.y + self.height // 2
@@ -193,9 +192,8 @@ class TiledRoom(Room):
             tile_x = (px // self.tile_size) * self.tile_size
             tile_y = (py // self.tile_size) * self.tile_size
 
-            has_weapon = random.choice([True, False])
-
-            weapon = random.choice(available_weapons)() if has_weapon else None
+            # Assign one weapon of each type, rest are None
+            weapon = weapon_types[i]() if i < len(weapon_types) else None
 
             pillar = Pillar(tile_x, tile_y, self.tile_size, weapon=weapon, toggleable=True)
             self.pillar_tiles.append(pillar)
@@ -343,23 +341,44 @@ class TiledRoom(Room):
         return (self.x <= x < self.x + self.width and 
                 self.y <= y < self.y + self.height)
     
-    def render(self, surface, camera_x=0, camera_y=0, show_collision_rects=False):
-        """Renderiza a sala com tiles."""
-        floor_rect = pygame.Rect(self.x - camera_x, self.y - camera_y, self.width, self.height)
-        pygame.draw.rect(surface, self.floor_color, floor_rect)
-        
+    def _cache_room_surface(self):
+        """Render static room elements to a cached surface."""
+        import pygame
+        surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        # Draw floor
+        floor_rect = pygame.Rect(0, 0, self.width, self.height)
+        surface.fill(self.floor_color, floor_rect)
+        # Draw wall tiles
         for tile in self.wall_tiles:
-            self._draw_tile(surface, tile, camera_x, camera_y)
-            if show_collision_rects:
-                rect = tile['rect']
-                debug_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
-                pygame.draw.rect(surface, (255, 0, 0), debug_rect, 2)
-        
+            rect = tile['rect'].copy()
+            rect.x -= self.x
+            rect.y -= self.y
+            pygame.draw.rect(surface, self.wall_color, rect)
+        # Draw pillars
+        for pillar in self.pillar_tiles:
+            pillar_rect = pillar.rect.copy()
+            pillar_rect.x -= self.x
+            pillar_rect.y -= self.y
+            pygame.draw.rect(surface, (100, 100, 120), pillar_rect)
+        # Draw dust particles
+        for dust in self.dust_particles:
+            dust_x = int(dust.x - self.x)
+            dust_y = int(dust.y - self.y)
+            s = pygame.Surface((dust.size, dust.size), pygame.SRCALPHA)
+            s.fill((*dust.color, dust.alpha))
+            surface.blit(s, (dust_x, dust_y))
+        self.cached_surface = surface
+
+    def render(self, surface, camera_x=0, camera_y=0, show_collision_rects=False):
+        """Renderiza a sala usando cached surface for static elements."""
+        if self.cached_surface:
+            render_rect = pygame.Rect(self.x - camera_x, self.y - camera_y, self.width, self.height)
+            surface.blit(self.cached_surface, render_rect)
+        # Draw dynamic elements (e.g., dropped weapons, animated effects) as needed
+        # Draw pillars and their weapons
         for pillar in self.pillar_tiles:
             pillar.render(surface, camera_x, camera_y)
-
-        for dust in self.dust_particles:
-            dust.render(surface, camera_x, camera_y)
+        # ...existing code for dynamic rendering if needed
 
 
 
@@ -376,6 +395,8 @@ class LShapedRoom(TiledRoom):
         total_height = main_height
         self.pillar_tiles = []  # <-- Aqui guardaremos os pilares
         super().__init__(x, y, total_width, total_height, tile_size)
+        self.cached_surface = None
+        self._cache_room_surface()
     
     def _generate_dust_particles(self):
         """Generate random dust particles on floor tiles for L-shaped room"""
@@ -524,18 +545,42 @@ class LShapedRoom(TiledRoom):
         l_rects = self._get_l_rectangles()
         return any(rect.collidepoint(x, y) for rect in l_rects)
     
-    def render(self, surface, camera_x=0, camera_y=0, show_collision_rects=False):
+    def _cache_room_surface(self):
+        """Render static L-shaped room elements to a cached surface."""
+        import pygame
+        surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        # Draw floor for each L rectangle
         l_rects = self._get_l_rectangles()
         for rect in l_rects:
-            floor_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
-            pygame.draw.rect(surface, self.floor_color, floor_rect)
-        
+            floor_rect = pygame.Rect(rect.x - self.x, rect.y - self.y, rect.width, rect.height)
+            surface.fill(self.floor_color, floor_rect)
+        # Draw wall tiles
         for tile in self.wall_tiles:
-            self._draw_tile(surface, tile, camera_x, camera_y)
-            if show_collision_rects:
-                rect = tile['rect']
-                debug_rect = pygame.Rect(rect.x - camera_x, rect.y - camera_y, rect.width, rect.height)
-                pygame.draw.rect(surface, (255, 0, 0), debug_rect, 2)
-
+            rect = tile['rect'].copy()
+            rect.x -= self.x
+            rect.y -= self.y
+            pygame.draw.rect(surface, self.wall_color, rect)
+        # Draw pillars
+        for pillar in self.pillar_tiles:
+            pillar_rect = pillar.rect.copy()
+            pillar_rect.x -= self.x
+            pillar_rect.y -= self.y
+            pygame.draw.rect(surface, (100, 100, 120), pillar_rect)
+        # Draw dust particles
         for dust in self.dust_particles:
-            dust.render(surface, camera_x, camera_y)
+            dust_x = int(dust.x - self.x)
+            dust_y = int(dust.y - self.y)
+            s = pygame.Surface((dust.size, dust.size), pygame.SRCALPHA)
+            s.fill((*dust.color, dust.alpha))
+            surface.blit(s, (dust_x, dust_y))
+        self.cached_surface = surface
+
+    def render(self, surface, camera_x=0, camera_y=0, show_collision_rects=False):
+        """Renderiza a sala em L usando cached surface."""
+        if self.cached_surface:
+            render_rect = pygame.Rect(self.x - camera_x, self.y - camera_y, self.width, self.height)
+            surface.blit(self.cached_surface, render_rect)
+        # Draw pillars and their weapons
+        for pillar in self.pillar_tiles:
+            pillar.render(surface, camera_x, camera_y)
+        # ...existing code for dynamic rendering if needed...

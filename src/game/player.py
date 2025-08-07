@@ -4,38 +4,15 @@ import time
 from numpy import angle, eye
 import pygame
 from pygame import gfxdraw
-from game.weapons import RangedWeapon, MeleeWeapon
+from game.weapons.weapon import Weapon
+from game.weapons.melee_weapons import MeleeWeapon
+from game.weapons.ranged_weapons import RangedWeapon
+from game.util.ui import ease_out_cubic
+from game.assets import get_image
 
 
 class Player:
-    def render_weapon_hud(self, surface, screen_width, screen_height):
-        # HUD: 3 squares at bottom right
-        slot_size = 32
-        spacing = 12
-        margin = 24
-        total_width = slot_size * 3 + spacing * 2
-        x_start = screen_width - margin - total_width
-        y = screen_height - margin - slot_size
-        for i in range(3):
-            x = x_start + i * (slot_size + spacing)
-            rect = pygame.Rect(x, y, slot_size, slot_size)
-            # Highlight active slot
-            if i == self.active_weapon_index:
-                color = (255, 255, 0)  # yellow border for active
-                border = 4
-            else:
-                color = (180, 180, 180)
-                border = 2
-            pygame.draw.rect(surface, color, rect, border)
-            # Optionally, fill if weapon exists
-            if self.weapons[i] is not None:
-                pygame.draw.rect(surface, (100, 200, 255), rect.inflate(-8, -8))
-            # Draw slot number
-            font = pygame.font.SysFont(None, 18)
-            num_surface = font.render(str(i+1), True, (255,255,255))
-            num_rect = num_surface.get_rect(center=rect.center)
-            surface.blit(num_surface, num_rect)
-    def __init__(self, x, y, speed=5, color=(200, 200, 50), size=16, sprite_path=None):
+    def __init__(self, x, y, speed=5, color=(255, 255, 255), size=16, sprite_path=None):
         self.x = x
         self.y = y
         self.speed = speed
@@ -72,11 +49,180 @@ class Player:
 
         if sprite_path:
             # Load and scale the sprite to the desired size
-            sprite_image = pygame.image.load(sprite_path).convert_alpha()
-            self.sprite = pygame.transform.scale(sprite_image, (self.size, self.size))
-        else:
-            self.sprite = None
-            self.color = (255, 255, 255)  # fallback color
+            sprite_image = get_image("player_sprite", sprite_path)
+            if sprite_image:
+                self.sprite = pygame.transform.scale(sprite_image, (self.size, self.size))
+            else:
+                self.sprite = None
+                self.color = (255, 255, 255)  # fallback color
+
+            
+        self.dropped_weapons = []  # List of (weapon, position)
+
+        # Footprints system
+        self.footprints = []  # List of (x, y, timestamp, side)
+        self._last_footprint_pos = (self.x, self.y)
+        self._footprint_distance = 18  # Minimum distance to leave a new footprint
+        self._footprint_side = "left"  # Alternates between 'left' and 'right'
+
+    def render_weapon_hud(self, surface, screen_width, screen_height):
+        # HUD: 3 squares at bottom right, using images for slots and weapon sprites
+        base_slot_size = 32 * 1.5
+        selected_scale = 1.25
+        spacing = 12 * 2
+        margin = 24 * 2
+        total_width = base_slot_size * 3 + spacing * 2
+        x_start = screen_width - margin - total_width
+        y = screen_height - margin - base_slot_size
+
+        # Use cached slot images
+        from game.assets import get_image, get_font
+        selected_img_raw = get_image("hotbar_selected", "game/assets/sprites/ui/hotbar/selected.png")
+        not_selected_img_raw = get_image("hotbar_not_selected", "game/assets/sprites/ui/hotbar/not_selected.png")
+
+        # Calculate fixed slot centers
+        slot_centers = []
+        for i in range(3):
+            cx = x_start + i * (base_slot_size + spacing) + base_slot_size // 2
+            cy = y + base_slot_size // 2
+            slot_centers.append((cx, cy))
+
+        # Animate slot transitions with ease_out_cubic
+        if not hasattr(self, '_hud_slot_progress'):
+            self._hud_slot_progress = [0.0, 0.0, 0.0]
+        for i in range(3):
+            target = 1.0 if i == self.active_weapon_index else 0.0
+            self._hud_slot_progress[i] += (target - self._hud_slot_progress[i]) * 0.2
+            eased = ease_out_cubic(self._hud_slot_progress[i])
+
+            slot_size = int(base_slot_size + (base_slot_size * (selected_scale - 1) * eased))
+            cx, cy = slot_centers[i]
+            rect = pygame.Rect(0, 0, slot_size, slot_size)
+            rect.center = (cx, cy)
+
+            # Draw slot background image with animation
+            if selected_img_raw and not_selected_img_raw:
+                img = selected_img_raw if i == self.active_weapon_index else not_selected_img_raw
+                img_scaled = pygame.transform.smoothscale(img, (slot_size, slot_size))
+                surface.blit(img_scaled, rect)
+            else:
+                color = (255, 255, 0) if i == self.active_weapon_index else (180, 180, 180)
+                border = 6 if i == self.active_weapon_index else 3
+                pygame.draw.rect(surface, color, rect, border)
+
+            weapon = self.weapons[i]
+            # Only draw slot number if no weapon in slot
+            if weapon is None:
+                font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", int(slot_size * 0.5))
+                num_surface = font.render(str(i+1), True, (255,255,255))
+                num_rect = num_surface.get_rect(center=rect.center)
+                surface.blit(num_surface, num_rect)
+
+            # Draw weapon HUD: use custom method if available, else default sprite
+            if weapon is not None:
+                padding = int(slot_size * 0.18)
+                sprite_size = int((slot_size - 2 * padding) * (0.9 + 0.1 * eased))
+                # If weapon has custom HUD rendering, use it
+                if hasattr(weapon, 'render_hud_sprite'):
+                    weapon.render_hud_sprite(surface, rect, sprite_size)
+                elif hasattr(weapon, 'sprite') and weapon.sprite is not None:
+                    sprite = weapon.sprite
+                    weapon_img = pygame.transform.smoothscale(sprite, (sprite_size, sprite_size))
+                    sprite_rect = weapon_img.get_rect(center=rect.center)
+                    surface.blit(weapon_img, sprite_rect)
+                    
+
+    def render_weapon_info_overlay(self, surface, camera_x=0, camera_y=0, room=None, zoom=1.0):
+        """
+        Renders weapon info overlay above dropped weapons (and pillar weapons if desired) when player is in pickup range.
+        Overlay appears between player and weapon, origin bottom left/right depending on player side.
+        """
+
+        px = self.x + self.size // 2
+        py = self.y + self.size // 2
+        pickup_radius = max(32 * 2, self.size)
+
+        # Font for overlay
+        from game.assets import FONTS
+        info_font = FONTS["overlay"]
+
+        # Overlay position: always on right side above weapon HUD
+        screen_width = surface.get_width()
+        margin = 24 * 2
+        base_slot_size = 32 * 1.5
+        spacing = 12 * 2
+        total_width = base_slot_size * 3 + spacing * 2
+        hud_x_start = screen_width - margin - total_width
+        hud_y = surface.get_height() - margin - base_slot_size
+        width = 180
+        overlay_x = hud_x_start + total_width // 2 - width // 2  # Centered above HUD
+        overlay_y = hud_y - 80  # Above HUD
+        box_color = (30, 30, 30)
+        border_color = (255, 255, 255)
+        border_radius = 8
+
+        # --- Dropped weapons ---
+        for weapon, pos in self.dropped_weapons:
+            wx, wy = pos
+            dist = math.hypot(px - wx, py - wy)
+            if dist < pickup_radius:
+                # Info to show (customize as needed)
+                info_lines = []
+                if hasattr(weapon, 'name'):
+                    info_lines.append(str(weapon.name))
+                if hasattr(weapon, 'damage'):
+                    info_lines.append(f"Damage: {getattr(weapon, 'damage')}")
+                if hasattr(weapon, 'type'):
+                    info_lines.append(f"Type: {getattr(weapon, 'type')}")
+                # Add more stats as needed
+
+                height = 20 + 22 * len(info_lines)
+                rect = pygame.Rect(overlay_x, overlay_y, width, height)
+                pygame.draw.rect(surface, box_color, rect, border_radius=border_radius)
+                pygame.draw.rect(surface, border_color, rect, 2, border_radius=border_radius)
+
+                # Draw text
+                for i, line in enumerate(info_lines):
+                    text_surface = info_font.render(line, True, (255, 255, 255))
+                    text_rect = text_surface.get_rect()
+                    text_rect.topleft = (rect.x + 10, rect.y + 10 + i * 22)
+                    surface.blit(text_surface, text_rect)
+
+        # --- Pillar weapons (if pillar has weapon attribute) ---
+        if room and hasattr(room, 'pillar_tiles'):
+            interaction_radius = 32
+            player_center = self.rect.center
+            for pillar in room.pillar_tiles:
+                dx = pillar.rect.centerx - player_center[0]
+                dy = pillar.rect.centery - player_center[1]
+                dist = (dx ** 2 + dy ** 2) ** 0.5
+                if dist <= interaction_radius and hasattr(pillar, 'weapon') and pillar.weapon:
+                    weapon = pillar.weapon
+                    info_lines = []
+                    if hasattr(weapon, 'name'):
+                        info_lines.append(str(weapon.name))
+                    if hasattr(weapon, 'damage'):
+                        info_lines.append(f"Damage: {getattr(weapon, 'damage')}")
+                    if hasattr(weapon, 'type'):
+                        info_lines.append(f"Type: {getattr(weapon, 'type')}")
+                    height = 20 + 22 * len(info_lines)
+                    rect = pygame.Rect(overlay_x, overlay_y, width, height)
+                    pygame.draw.rect(surface, box_color, rect, border_radius=border_radius)
+                    pygame.draw.rect(surface, border_color, rect, 2, border_radius=border_radius)
+                    for i, line in enumerate(info_lines):
+                        text_surface = info_font.render(line, True, (255, 255, 255))
+                        text_rect = text_surface.get_rect()
+                        text_rect.topleft = (rect.x + 10, rect.y + 10 + i * 22)
+                        surface.blit(text_surface, text_rect)
+
+    def drop_weapon(self):
+        weapon = self.get_active_weapon()
+        if weapon is not None:
+            # Drop weapon above player
+            drop_x = self.x + self.size // 2
+            drop_y = self.y - self.size // 2
+            self.dropped_weapons.append((weapon, (drop_x, drop_y)))
+            self.weapons[self.active_weapon_index] = None
 
     def set_position(self, x, y):
         """Set player position directly"""
@@ -85,10 +231,27 @@ class Player:
         self.rect.topleft = (x, y)
 
     def try_interact_with_pillars(self, rooms):
+        interaction_radius = 32
+        player_center = self.rect.center
         for room in rooms:
             for pillar in room.pillar_tiles:
-                if self.rect.colliderect(pillar.rect.inflate(8, 8)):
-                    pillar.interact(self)
+                dx = pillar.rect.centerx - player_center[0]
+                dy = pillar.rect.centery - player_center[1]
+                dist = (dx ** 2 + dy ** 2) ** 0.5
+                if dist <= interaction_radius:
+                    # If pillar has a weapon, try to pick it up in the next available slot
+                    if hasattr(pillar, 'weapon') and pillar.weapon:
+                        empty_slot = None
+                        for i, w in enumerate(self.weapons):
+                            if w is None:
+                                empty_slot = i
+                                break
+                        if empty_slot is not None:
+                            self.weapons[empty_slot] = pillar.weapon
+                            pillar.weapon = None
+                        # else: all slots full, do nothing
+                    else:
+                        pillar.interact(self)
 
     def attack(self, camera_x=0, camera_y=0, zoom=1.0, projectiles=None):
         weapon = self.get_active_weapon()
@@ -121,8 +284,26 @@ class Player:
         # Set weapon in current slot
         self.weapons[self.active_weapon_index] = value
 
-
-
+    def try_pickup_weapon(self):
+        # Find the first empty slot
+        empty_slot = None
+        for i, w in enumerate(self.weapons):
+            if w is None:
+                empty_slot = i
+                break
+        if empty_slot is None:
+            return False  # No empty slot available
+        px = self.x + self.size // 2
+        py = self.y + self.size // 2
+        pickup_radius = max(32 * 2, self.size)
+        for idx, (weapon, pos) in enumerate(self.dropped_weapons):
+            wx, wy = pos
+            dist = math.hypot(px - wx, py - wy)
+            if dist < pickup_radius:
+                self.weapons[empty_slot] = weapon
+                del self.dropped_weapons[idx]
+                return True
+        return False
 
     def handle_input(self, rooms=None):
         if rooms is None:
@@ -139,6 +320,22 @@ class Player:
             self.active_weapon_index = 1
         elif keys[pygame.K_3]:
             self.active_weapon_index = 2
+
+        # Drop weapon (Q)
+        if keys[pygame.K_q]:
+            if not hasattr(self, '_q_pressed') or not self._q_pressed:
+                self._q_pressed = True
+                self.drop_weapon()
+        else:
+            self._q_pressed = False
+
+        # Pick up weapon (E)
+        if keys[pygame.K_e]:
+            if not hasattr(self, '_e_pressed') or not self._e_pressed:
+                self._e_pressed = True
+                self.try_pickup_weapon()
+        else:
+            self._e_pressed = False
 
         sprinting = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
 
@@ -182,6 +379,23 @@ class Player:
                 self.y = new_y
 
         self.rect.topleft = (self.x, self.y)
+
+        # --- Footprints logic ---
+        moved_dist = math.hypot(self.x - self._last_footprint_pos[0], self.y - self._last_footprint_pos[1])
+        if moved_dist > self._footprint_distance:
+            # Alternate footprint side
+            offset = self.size // 4
+            # Determine movement direction (angle)
+            dx = self.x - self._last_footprint_pos[0]
+            dy = self.y - self._last_footprint_pos[1]
+            angle = math.atan2(dy, dx) if dx != 0 or dy != 0 else 0
+            # Perpendicular offset for left/right
+            perp_angle = angle + (math.pi / 2 if self._footprint_side == "left" else -math.pi / 2)
+            fp_x = int(self.x + self.size // 2 + math.cos(perp_angle) * offset)
+            fp_y = int(self.y + self.size // 2 + math.sin(perp_angle) * offset)
+            self.footprints.append((fp_x, fp_y, time.time(), self._footprint_side))
+            self._last_footprint_pos = (self.x, self.y)
+            self._footprint_side = "right" if self._footprint_side == "left" else "left"
 
     def get_mouse_angle(self, camera_x=0, camera_y=0, zoom=1.0):
         mouse_x, mouse_y = pygame.mouse.get_pos()
@@ -314,12 +528,9 @@ class Player:
         circle_x = center_x
         circle_y = y if invert else y + height
         arc_radius = circle_radius
-        # Load the horseshoe asset (white version)
-        # You may want to cache this in a class/static variable for performance
-        try:
-            horseshoe_img = pygame.image.load("game/assets/sprites/ui/horseshoe.png").convert_alpha()
-        except Exception:
-            horseshoe_img = None
+        # Use cached horseshoe asset
+        from game.assets import get_image
+        horseshoe_img = get_image("horseshoe", "game/assets/sprites/ui/horseshoe.png")
         if horseshoe_img:
             # Scale the horseshoe to fit the arc_radius
             scale_factor = (arc_radius * 2) / max(horseshoe_img.get_width(), horseshoe_img.get_height())
@@ -347,11 +558,9 @@ class Player:
             max_value_rect = max_value_surface.get_rect()
             value_rect = value_surface.get_rect()
             # Label text (smaller, but same custom font)
-            try:
-                font_path = font.path if hasattr(font, 'path') else "game/assets/fonts/CinzelDecorative-Black.ttf"
-                label_font = pygame.font.Font(font_path, max(12, font.get_height() // 2))
-            except Exception:
-                label_font = pygame.font.SysFont(None, max(12, font.get_height() // 2))
+            from game.assets import get_font
+            font_path = getattr(font, 'path', "game/assets/fonts/CinzelDecorative-Black.ttf")
+            label_font = get_font(font_path, max(12, font.get_height() // 2))
             label_surface = label_font.render(label, True, (255, 255, 255))
             label_rect = label_surface.get_rect()
 
@@ -405,12 +614,9 @@ class Player:
         mid = (255, 255, 255)
         top = (255, 255, 255)
 
-        # Load custom font
-        font_path = "game/assets/fonts/CinzelDecorative-Black.ttf"
-        try:
-            custom_font = pygame.font.Font(font_path, 24)
-        except Exception:
-            custom_font = pygame.font.SysFont(None, 24)
+        # Use cached custom font
+        from game.assets import FONTS
+        custom_font = FONTS["bar"]
 
         self._draw_vertical_bar_with_layers(
             surface, bar_x, bar_y, bar_height,
@@ -495,16 +701,6 @@ class Player:
             self.is_blinking = False
             self.blink_timer = 0.0
 
-                
-    def get_interactable_pillars(self, player_rect, radius=64):
-        interactables = []
-        for pillar in self.pillar_tiles:
-            if player_rect.colliderect(pillar.rect.inflate(radius, radius)):
-                interactables.append(pillar)
-        return interactables
-
-
-
     def render(self, surface, camera_x=0, camera_y=0, rooms=None, zoom=1.0, show_collision_rects=False, dt=0.016):
         from game.util.light import create_soft_player_light
         # Calculate render position with camera offset
@@ -545,6 +741,37 @@ class Player:
             wall_rects=wall_rects
         )
 
+        # --- Render player shadow ---
+        shadow_width = int(self.size * 0.9)
+        shadow_height = int(self.size * 0.4)
+        shadow_x = render_x + (self.size - shadow_width) // 2
+        shadow_y = render_y + self.size - shadow_height // 2
+        shadow_surf = pygame.Surface((shadow_width, shadow_height), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow_surf, (0, 0, 0, 80), (0, 0, shadow_width, shadow_height))
+        surface.blit(shadow_surf, (shadow_x, shadow_y))
+
+        # --- Render footprints ---
+        footprint_color = (200, 200, 200)
+        footprint_radius = max(2, self.size // 6)
+        max_footprints = 60
+        fade_time = 1.0  # seconds before footprint fades
+        now = time.time()
+        # Only keep recent footprints
+        self.footprints = [fp for fp in self.footprints if now - fp[2] < fade_time]
+        for fp_x, fp_y, fp_time, fp_side in self.footprints[-max_footprints:]:
+            alpha = max(0, 255 - int((now - fp_time) / fade_time * 255))
+            # Optionally, rotate/shape footprint based on side
+            footprint_surf = pygame.Surface((footprint_radius*2, footprint_radius*2), pygame.SRCALPHA)
+            pygame.draw.ellipse(
+                footprint_surf,
+                (*footprint_color, alpha),
+                (0, footprint_radius//2, footprint_radius*2, footprint_radius)
+            )
+            # Optionally flip for right side
+            if fp_side == "right":
+                footprint_surf = pygame.transform.flip(footprint_surf, True, False)
+            surface.blit(footprint_surf, (fp_x - footprint_radius - camera_x, fp_y - footprint_radius - camera_y))
+
         # Weapon rendering delegated to weapon class
         weapon = self.get_active_weapon()
         if weapon and hasattr(weapon, 'render'):
@@ -563,59 +790,67 @@ class Player:
             except TypeError:
                 weapon.render(surface, player_center, angle, camera_x, camera_y, zoom)
 
-        if self.sprite:
-            surface.blit(self.sprite, (render_x, render_y))
+        # Render dropped weapons above player at correct size
+        dropped_weapon_size = 32  # or use self.size if you want player size
+        for dropped_weapon, pos in self.dropped_weapons:
+            if hasattr(dropped_weapon, 'render_static'):
+                # Pass the intended size for dropped weapons
+                try:
+                    dropped_weapon.render_static(surface, (pos[0] - camera_x, pos[1] - camera_y), camera_x, camera_y, zoom, size=dropped_weapon_size)
+                except TypeError:
+                    # Fallback for older render_static signatures
+                    dropped_weapon.render_static(surface, (pos[0] - camera_x, pos[1] - camera_y), camera_x, camera_y, zoom)
+
+        # --- pega posição do mouse no mundo ---
+        mouse_screen_x, mouse_screen_y = pygame.mouse.get_pos()
+        mouse_virtual_x = mouse_screen_x / zoom + camera_x
+        mouse_virtual_y = mouse_screen_y / zoom + camera_y
+
+        player_center_x = self.x + self.size // 2
+        player_center_y = self.y + self.size // 2
+
+        dx = mouse_virtual_x - player_center_x
+
+        eye_offset = 2
+        if dx > 5:
+            eye_shift = eye_offset
+        elif dx < -5:
+            eye_shift = -eye_offset
         else:
-            # --- pega posição do mouse no mundo ---
-            mouse_screen_x, mouse_screen_y = pygame.mouse.get_pos()
-            mouse_virtual_x = mouse_screen_x / zoom + camera_x
-            mouse_virtual_y = mouse_screen_y / zoom + camera_y
+            eye_shift = 0
 
-            player_center_x = self.x + self.size // 2
-            player_center_y = self.y + self.size // 2
+        render_x = self.x - camera_x
+        render_y = self.y - camera_y
 
-            dx = mouse_virtual_x - player_center_x
+        # --- bob timer já atualizado no update(dt), aqui só calcula o offset ---
+        eye_bob_offset = (self.eye_bob_amplitude + 3) * math.sin(self.eye_bob_timer * 2 * math.pi * (self.eye_bob_speed + 0.5))
 
-            eye_offset = 2
-            if dx > 5:
-                eye_shift = eye_offset
-            elif dx < -5:
-                eye_shift = -eye_offset
-            else:
-                eye_shift = 0
+        # Corpo: encolhe a altura baseado no bob
+        new_height = int(self.size - abs(eye_bob_offset) * 0.5)
+        new_width = int(self.size + abs(eye_bob_offset) * 0.5 * 2)
 
-            render_x = self.x - camera_x
-            render_y = self.y - camera_y
+        base_y = render_y + self.size
+        new_y = base_y - new_height
 
-            # --- bob timer já atualizado no update(dt), aqui só calcula o offset ---
-            eye_bob_offset = (self.eye_bob_amplitude + 3) * math.sin(self.eye_bob_timer * 2 * math.pi * (self.eye_bob_speed + 0.5))
+        base_x = render_x + self.size / 2
+        new_x = base_x - new_width / 2
 
-            # Corpo: encolhe a altura baseado no bob
-            new_height = int(self.size - abs(eye_bob_offset) * 0.5)
-            new_width = int(self.size + abs(eye_bob_offset) * 0.5 * 2)
+        player_rect = pygame.Rect(new_x, new_y, new_width, new_height)
+        pygame.draw.rect(surface, self.color, player_rect)
 
-            base_y = render_y + self.size
-            new_y = base_y - new_height
+        # Olhos
+        eye_size = 2
 
-            base_x = render_x + self.size / 2
-            new_x = base_x - new_width / 2
+        eye_y_base = render_y + 5
+        eye_y = eye_y_base  # olhos sobem e descem suavemente
 
-            player_rect = pygame.Rect(new_x, new_y, new_width, new_height)
-            pygame.draw.rect(surface, self.color, player_rect)
+        left_eye_x = render_x + 5 + eye_shift
+        right_eye_x = render_x + self.size - 5 - eye_size + eye_shift
 
-            # Olhos
-            eye_size = 2
+        if self.is_blinking:
+            eye_height = 0
+        else:
+            eye_height = 2
 
-            eye_y_base = render_y + 5
-            eye_y = eye_y_base  # olhos sobem e descem suavemente
-
-            left_eye_x = render_x + 5 + eye_shift
-            right_eye_x = render_x + self.size - 5 - eye_size + eye_shift
-
-            if self.is_blinking:
-                eye_height = 0
-            else:
-                eye_height = 2
-
-            pygame.draw.rect(surface, (0, 0, 0), (left_eye_x, eye_y, eye_size, eye_height))
-            pygame.draw.rect(surface, (0, 0, 0), (right_eye_x, eye_y, eye_size, eye_height))
+        pygame.draw.rect(surface, (0, 0, 0), (left_eye_x, eye_y, eye_size, eye_height))
+        pygame.draw.rect(surface, (0, 0, 0), (right_eye_x, eye_y, eye_size, eye_height))

@@ -11,8 +11,7 @@ from game.util.ui import Button
 
 class GameEngine:
     # Track previous room index for rendering
-    def __init__(self, width=800, height=600, title="Dungeon Crawler", fullscreen=True):
-        pygame.init()
+    def __init__(self, screen, width=800, height=600, title="Dungeon Crawler", fullscreen=True):
         self.mouse_attack_held = False  # Track if mouse attack button is held
         
         # Configurar fullscreen
@@ -20,11 +19,11 @@ class GameEngine:
             info = pygame.display.Info()
             self.width = info.current_w
             self.height = info.current_h
-            self.screen = pygame.display.set_mode((self.width, self.height), pygame.NOFRAME)
+            self.screen = screen
         else:
             self.width = width
             self.height = height
-            self.screen = pygame.display.set_mode((width, height))
+            self.screen = screen
             
         pygame.display.set_caption(title)
         self.clock = pygame.time.Clock()
@@ -61,16 +60,105 @@ class GameEngine:
 
         # FPS monitor
         self.show_fps = False
-        self.fps_font = pygame.font.Font(None, 32)
+        from game.assets import get_font, get_image
+        self.fps_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 32)
 
         # Collision rects debug
         self.show_collision_rects = False
+
         # --- GLOBAL PROJECTILES LIST ---
         import builtins
         if not hasattr(builtins, 'projectiles') or not isinstance(builtins.projectiles, list):
             builtins.projectiles = []
         self.projectiles = builtins.projectiles
 
+        # Crosshair particles
+        self.crosshair_particles = []
+        self.particle_spawn_timer = 0
+        self.particle_spawn_interval = 0.05  # seconds between particles
+        self.particle_lifetime = 0.5  # seconds
+        self.particle_colors = [
+            (255, 255, 255),  # white
+            (230, 230, 255),  # light blue-white
+            (255, 230, 230)   # light pink-white
+        ]
+        # Load crosshair sprite
+        try:
+            self.crosshair_normal = get_image("crosshair_normal", "game/assets/sprites/ui/cursor/cursor.png")
+            self.crosshair_attack = get_image("crosshair_attack", "game/assets/sprites/ui/cursor/cursor_attack.png")
+            # Scale if needed (example scales to 16x16)
+            size = (16, 16)
+            if self.crosshair_normal:
+                self.crosshair_normal = pygame.transform.scale(self.crosshair_normal, size)
+            if self.crosshair_attack:
+                self.crosshair_attack = pygame.transform.scale(self.crosshair_attack, size)
+            if not self.crosshair_normal or not self.crosshair_attack:
+                raise Exception("Missing crosshair image")
+        except:
+            # Fallback: create simple crosshairs if images not found
+            size = (32, 32)
+            self.crosshair_normal = pygame.Surface(size, pygame.SRCALPHA)
+            pygame.draw.line(self.crosshair_normal, (255, 255, 255), (16, 0), (16, 32), 2)
+            pygame.draw.line(self.crosshair_normal, (255, 255, 255), (0, 16), (32, 16), 2)
+            self.crosshair_attack = pygame.Surface(size, pygame.SRCALPHA)
+            pygame.draw.line(self.crosshair_attack, (255, 0, 0), (16, 0), (16, 32), 3)
+            pygame.draw.line(self.crosshair_attack, (255, 0, 0), (0, 16), (32, 16), 3)
+            
+        # Current crosshair (starts as normal)
+        self.current_crosshair = self.crosshair_normal
+        self.crosshair_offset = (size[0] // 2, size[1] // 2)
+        
+        # For smooth transitions
+        self.crosshair_scale = 1.0
+        self.target_scale = 1.0
+
+    def update_crosshair(self, dt):
+        """Smoothly transition between crosshair states"""
+        if self.mouse_attack_held:
+            self.target_scale = 0.8  # Smaller when attacking
+            self.current_crosshair = self.crosshair_attack
+        else:
+            self.target_scale = 1.0  # Normal size
+            self.current_crosshair = self.crosshair_normal
+        
+        # Smooth scaling animation
+        self.crosshair_scale += (self.target_scale - self.crosshair_scale) * 0.2
+        
+        # Ensure we don't get stuck in between values
+        if abs(self.crosshair_scale - self.target_scale) < 0.01:
+            self.crosshair_scale = self.target_scale
+            
+    def update_crosshair_particles(self, dt):
+        # Update existing particles
+        for particle in self.crosshair_particles[:]:
+            particle['time'] += dt
+            particle['alpha'] = int(255 * (1 - (particle['time'] / self.particle_lifetime)))
+            if particle['time'] >= self.particle_lifetime:
+                self.crosshair_particles.remove(particle)
+        
+        # Spawn new particles
+        self.particle_spawn_timer += dt
+        if self.particle_spawn_timer >= self.particle_spawn_interval:
+            self.particle_spawn_timer = 0
+            mouse_pos = pygame.mouse.get_pos()
+            
+            # Add some randomness to position
+            offset = pygame.math.Vector2(
+                random.uniform(-10, 10),
+                random.uniform(-10, 10)
+            )
+
+            self.crosshair_particles.append({
+                'pos': pygame.math.Vector2(mouse_pos[0] + offset.x, mouse_pos[1] + offset.y),
+                'time': 0,
+                'alpha': 255,
+                'radius': random.uniform(1, 3),
+                'color': random.choice(self.particle_colors),
+                'velocity': pygame.math.Vector2(
+                    random.uniform(-20, 20),
+                    random.uniform(5, 15))  # slight downward drift
+            })
+            
     def add_light_source(self, x, y, radius, intensity=255):
         self.light_sources.append({
             'pos': (x, y),
@@ -138,53 +226,194 @@ class GameEngine:
         self.camera_y += (target_camera_y - self.camera_y) * self.camera_smoothing
 
     def run_pause_menu(self):
+        # Only set up cooldown variable, but do not check/set it when opening
+        if not hasattr(self, '_global_pause_cooldown'):
+            self._global_pause_cooldown = 0.0
+        cooldown_time = 1.5  # seconds
+        current_time = pygame.time.get_ticks() / 1000.0
+        background_snapshot = self.screen.copy()
+
+        # Create buttons
         button_resume = Button("Resume", (self.width//2 - 150, self.height//2 - 60, 300, 60), action=None)
         button_quit = Button("Quit", (self.width//2 - 150, self.height//2 + 20, 300, 60), action=None)
-        
+        buttons = [button_resume, button_quit]
+        selected_index = 0
+
         def resume():
-            nonlocal running_pause
-            running_pause = False
-        
+            nonlocal running_pause, animating_out, animation_time
+            animating_out = True
+            animation_time = 0.0
+
         def quit_game():
-            nonlocal running_pause
+            nonlocal running_pause, animating_out, animation_time
             self.running = False
-            running_pause = False
-        
+            animating_out = True
+            animation_time = 0.0
+
         button_resume.action = resume
         button_quit.action = quit_game
-        
+
         running_pause = True
-        
-        # Create a semi-transparent surface for overlay once
+        animating_in = True
+        animating_out = False
+        animation_time = 0.0
+        animation_duration = 3.0  # seconds
+        bounce_height = 40
+        overlay_alpha = 100
+
+        # Create overlay
         overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        overlay.fill((10, 10, 10, 10))  # last value is alpha (0-255), 150 ~ semi-transparent
-        
+        overlay.fill((0, 0, 0, overlay_alpha))
+
+        # Pause text
+        from game.util.ui import blur_surface
         font = pygame.font.Font(None, 72)
         text_surf = font.render("I I", True, (255, 255, 255))
-        text_rect = text_surf.get_rect(center=(self.width//2, self.height//2 - 150))
-        
+        blurred_text_surf = blur_surface(text_surf, iterations=2)
+        text_rect = blurred_text_surf.get_rect(center=(self.width//2, self.height//2 - 150))
+
+        pygame.mouse.set_visible(False)  # Always hide system cursor
+        mouse_active = False
+
+        def ease_out_cubic(t):
+            # t in [0,1]
+            return 1 - pow(1 - t, 3)
+
+        def get_anim_y(start_y, end_y, t, bounce=True):
+            # t in [0,1]
+            # Use ease-out cubic for slide effect
+            eased = ease_out_cubic(t)
+            return start_y + (end_y - start_y) * eased
+
+        # Initial positions
+        menu_top_y = -self.height
+        menu_final_y = 0
+        text_final_y = self.height//2 - 150
+        button_offsets = [self.height//2 - 60, self.height//2 + 20]
+
         while running_pause:
-            self.clock.tick(60)
+            # Update crosshair and particles (dt from clock)
+            self.dt = self.clock.get_time() / 1000.0
+            self.update_crosshair(self.dt)
+            self.update_crosshair_particles(self.dt)
             mouse_pos = pygame.mouse.get_pos()
-            
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
                     running_pause = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        running_pause = False
+                        # Only allow ESC if not animating in/out
+                        if not animating_in and not animating_out:
+                            animating_out = True
+                            animation_time = 0.0
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_index = (selected_index + 1) % len(buttons)
+                        mouse_active = False
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        selected_index = (selected_index - 1) % len(buttons)
+                        mouse_active = False
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if not animating_in and not animating_out:
+                            buttons[selected_index].action()
+                elif event.type == pygame.MOUSEMOTION:
+                    prev_selected = selected_index
+                    mouse_active = True
+                    # Only update selected_index if mouse is over a different button
+                    for i, button in enumerate(buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            if i != selected_index:
+                                selected_index = i
+                            break
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    button_resume.click(mouse_pos)
-                    button_quit.click(mouse_pos)
-            
-            # Instead of filling, blit the semi-transparent overlay
-            self.screen.blit(overlay, (0, 0))
-            
-            button_resume.draw(self.screen, mouse_pos)
-            button_quit.draw(self.screen, mouse_pos)
+                    if not animating_in and not animating_out:
+                        for i, button in enumerate(buttons):
+                            if button.rect.collidepoint(mouse_pos):
+                                selected_index = i
+                                button.action()
 
-            self.screen.blit(text_surf, text_rect)
+            # Animation logic
+            if animating_in:
+                animation_time += self.dt
+                t = min(animation_time / animation_duration, 1.0)
+                menu_y = get_anim_y(menu_top_y, menu_final_y, t, bounce=False)
+                text_y = get_anim_y(menu_top_y + text_final_y, text_final_y, t, bounce=False)
+                button_ys = [get_anim_y(menu_top_y + b, b, t, bounce=False) for b in button_offsets]
+                if t >= 1.0:
+                    animating_in = False
+            elif animating_out:
+                animation_time += self.dt
+                t = min(animation_time / animation_duration, 1.0)
+                menu_y = get_anim_y(menu_final_y, menu_top_y, t, bounce=False)
+                text_y = get_anim_y(text_final_y, menu_top_y + text_final_y, t, bounce=False)
+                button_ys = [get_anim_y(b, menu_top_y + b, t, bounce=False) for b in button_offsets]
+                if t >= 1.0:
+                    running_pause = False
+                    # Set global cooldown only after closing menu
+                    self._global_pause_cooldown = pygame.time.get_ticks() / 1000.0 + cooldown_time
+            else:
+                menu_y = menu_final_y
+                text_y = text_final_y
+                button_ys = button_offsets
+
+            # Draw the snapshot of the game scene
+            self.screen.blit(background_snapshot, (0, 0))
+
+            # Draw overlay with animated Y
+            overlay_y = int(menu_y)
+            self.screen.blit(overlay, (0, overlay_y))
+
+            # Draw thick white line at the bottom of the pause menu
+            line_y = overlay_y + self.height  # 20px from bottom of overlay
+            pygame.draw.line(
+                self.screen,
+                (255, 255, 255),
+                (0, line_y),
+                (self.width, line_y),
+                8  # thickness in pixels
+            )
+
+            # Draw pause text with animated Y
+            text_rect_anim = blurred_text_surf.get_rect(center=(self.width//2, int(text_y)))
+            self.screen.blit(text_surf, text_rect_anim)
+
+            # Draw buttons with selection logic and animated Y
+            for i, button in enumerate(buttons):
+                # If mouse_active, highlight selected_index unless mouse is over another button
+                if mouse_active:
+                    is_selected = (i == selected_index)
+                else:
+                    is_selected = (i == selected_index)
+                # Draw at animated Y
+                button_rect = button.rect.copy()
+                button_rect.y = int(button_ys[i])
+                button.rect = button_rect
+                button.draw(self.screen, mouse_pos, selected=is_selected)
+            # Restore button rects after drawing
+            for i, button in enumerate(buttons):
+                button.rect.y = button_offsets[i]
+
+            # Draw crosshair particles
+            for particle in self.crosshair_particles:
+                particle['pos'] += particle['velocity'] * self.dt
+                particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
+                color_with_alpha = (*particle['color'], particle['alpha'])
+                pygame.draw.circle(
+                    particle_surface, 
+                    color_with_alpha, 
+                    (particle['radius'], particle['radius']), 
+                    particle['radius'])
+                self.screen.blit(
+                    particle_surface,
+                    (particle['pos'].x - particle['radius'],
+                    particle['pos'].y - particle['radius']))
+
+            # Draw custom crosshair at mouse position (pause menu)
+            crosshair_img = self.current_crosshair if hasattr(self, 'current_crosshair') else None
+            crosshair_offset = self.crosshair_offset if hasattr(self, 'crosshair_offset') else (0, 0)
+            if crosshair_img:
+                self.screen.blit(crosshair_img, (mouse_pos[0] - crosshair_offset[0], mouse_pos[1] - crosshair_offset[1]))
+
             pygame.display.flip()
 
     def handle_events(self):
@@ -200,19 +429,13 @@ class GameEngine:
                 elif event.key == pygame.K_F4:
                     self.show_collision_rects = not self.show_collision_rects
 
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 self.mouse_attack_held = True
-                # Ensure we pass the projectiles list
-                self.player.attack(
-                    self.camera_x, 
-                    self.camera_y, 
-                    self.zoom, 
-                    self.projectiles  # This is the critical parameter
-                )
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.mouse_attack_held = False
 
     def update(self):
+        self.dt = self.clock.get_time() / 1000.0  # seconds
         current_index = self.dungeon.current_room_index
         adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
 
@@ -237,19 +460,32 @@ class GameEngine:
 
         # update camera to follow player
         self._update_camera()
+        self.update_crosshair(self.dt)
+        self.update_crosshair_particles(self.dt)
+
         # --- UPDATE PROJECTILES ---
-        dt = self.clock.get_time() / 1000.0  # seconds
+        if self.mouse_attack_held:
+            self.player.attack(
+                self.camera_x,
+                self.camera_y,
+                self.zoom,
+                self.projectiles
+            )
+            
         current_room = self.dungeon.get_current_room()
+
         enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
         # Get wall rects for the current room
         wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
         # Get room boundary as a pygame.Rect
         room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
         for proj in self.projectiles[:]:
-            proj.update(dt, enemies, wall_rects, room_rect)
+            proj.update(self.dt, enemies, wall_rects, room_rect)
             if not getattr(proj, 'is_alive', True):
-                print("Removing dead projectile")  # Debug removal
                 self.projectiles.remove(proj)
+        # --- UPDATE ENEMIES ---
+        for enemy in enemies:
+            enemy.update()
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
@@ -312,6 +548,11 @@ class GameEngine:
         for room in rooms_to_render:
             room.render(virtual_surface, self.camera_x, self.camera_y, 
                     show_collision_rects=self.show_collision_rects)
+
+        # --- RENDER ENEMIES IN CURRENT ROOM ---
+        enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
+        for enemy in enemies:
+            enemy.draw(virtual_surface, self.camera_x, self.camera_y)
 
         # Render the player
         self.player.render(
@@ -376,7 +617,7 @@ class GameEngine:
 
         # Create player light mask using ray casting (if needed, can be added here)
         player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
-        player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
+        player_center_y = int(self.player.y - self.camera_x + self.player.size // 2)
 
         # Collect wall rects in screen space (if needed for future light logic)
 
@@ -392,6 +633,44 @@ class GameEngine:
         self.dungeon.render_ui(self.screen)
         self.player.render_bars(self.screen, self.screen.get_height())  # top-left corner HUD bars
         self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())  # top-right corner weapon HUD
+        self.player.render_weapon_info_overlay(self.screen, self.camera_x, self.camera_y, self.room, self.zoom)  # Render weapon info overlay if player is near a weapon
+
+        # Draw crosshair particles
+        for particle in self.crosshair_particles:
+            # Update position based on velocity
+            particle['pos'] += particle['velocity'] * self.dt
+
+            # Create particle surface
+            particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
+            color_with_alpha = (*particle['color'], particle['alpha'])
+            pygame.draw.circle(
+                particle_surface, 
+                color_with_alpha, 
+                (particle['radius'], particle['radius']), 
+                particle['radius'])
+            
+            # Draw particle
+            self.screen.blit(
+                particle_surface,
+                (particle['pos'].x - particle['radius'],
+                particle['pos'].y - particle['radius']))
+            
+        # Draw crosshair at mouse position
+        mouse_pos = pygame.mouse.get_pos()
+
+        # Apply smooth scaling
+        if abs(self.crosshair_scale - 1.0) > 0.01:
+            scaled_size = (int(self.current_crosshair.get_width() * self.crosshair_scale), 
+                        int(self.current_crosshair.get_height() * self.crosshair_scale))
+            scaled_crosshair = pygame.transform.scale(self.current_crosshair, scaled_size)
+            offset = (scaled_size[0] // 2, scaled_size[1] // 2)
+            self.screen.blit(scaled_crosshair, 
+                            (mouse_pos[0] - offset[0], 
+                            mouse_pos[1] - offset[1]))
+        else:
+            self.screen.blit(self.current_crosshair, 
+                            (mouse_pos[0] - self.crosshair_offset[0], 
+                            mouse_pos[1] - self.crosshair_offset[1]))
 
         # FPS monitor
         if self.show_fps:
