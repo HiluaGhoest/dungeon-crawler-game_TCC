@@ -107,10 +107,15 @@ class GameEngine:
         # Current crosshair (starts as normal)
         self.current_crosshair = self.crosshair_normal
         self.crosshair_offset = (size[0] // 2, size[1] // 2)
-        
+        self.is_paused = False  # Flag para pausar atualizações
+        self.pause_start_time = 0  # Armazenará quando o pause começou
+
+            
         # For smooth transitions
         self.crosshair_scale = 1.0
         self.target_scale = 1.0
+
+        self.enemies = []
         
     def update_crosshair(self, dt):
         """Smoothly transition between crosshair states"""
@@ -226,6 +231,9 @@ class GameEngine:
         self.camera_y += (target_camera_y - self.camera_y) * self.camera_smoothing
 
     def run_pause_menu(self):
+        self.is_paused = True  # Ativa flag de pausa
+        self.pause_start_time = pygame.time.get_ticks()  # Registra o início do pause
+
         # Only set up cooldown variable, but do not check/set it when opening
         if not hasattr(self, '_global_pause_cooldown'):
             self._global_pause_cooldown = 0.0
@@ -349,8 +357,13 @@ class GameEngine:
                 button_ys = [get_anim_y(b, menu_top_y + b, t, bounce=False) for b in button_offsets]
                 if t >= 1.0:
                     running_pause = False
+                    self.is_paused = False  # Desativa flag de pausa ao sair do menu
+                    pause_duration = pygame.time.get_ticks() - self.pause_start_time
+                    self.clock.tick()  # Reseta o clock
                     # Set global cooldown only after closing menu
                     self._global_pause_cooldown = pygame.time.get_ticks() / 1000.0 + cooldown_time
+                    return pause_duration
+
             else:
                 menu_y = menu_final_y
                 text_y = text_final_y
@@ -416,6 +429,7 @@ class GameEngine:
 
             pygame.display.flip()
 
+
     def handle_events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -437,62 +451,6 @@ class GameEngine:
                 self.mouse_attack_held = True
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.mouse_attack_held = False
-
-    def update(self):
-        self.dt = self.clock.get_time() / 1000.0  # seconds
-        current_index = self.dungeon.current_room_index
-        adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
-
-        # Always update self.enemies to current room's enemies
-        current_room = self.dungeon.get_current_room()
-        self.enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
-
-        # move player
-        self.player.update(rooms=adjacent_rooms)
-
-        # update room based on player position (bounding box detection)
-        if self.mouse_attack_held:
-            if self.player.attack(self.camera_x, self.camera_y, self.zoom, self.projectiles, self.enemies):
-                print("Ataque executado!")
-        prev_room_index = self.dungeon.current_room_index
-        self.dungeon.update_player_room(self.player.rect)
-        if self.dungeon.current_room_index != prev_room_index:
-            # Track previous room index
-            self.previous_room_index = prev_room_index
-            print(f"[DEBUG] room_opening_sides for {self.dungeon.current_room_index}:",
-                  self.dungeon.room_opening_sides.get(self.dungeon.current_room_index))
-            print(f"[DEBUG] opening_positions for room {self.dungeon.current_room_index}:")
-            for o in self.dungeon.opening_positions:
-                print("   ", o)
-            self.room = self.dungeon.get_current_room()
-            self.enemies = getattr(self.room, 'enemies', []) if hasattr(self.room, 'enemies') else []
-
-        # update camera to follow player
-        self._update_camera()
-        self.update_crosshair(self.dt)
-        self.update_crosshair_particles(self.dt)
-
-        # --- UPDATE PROJECTILES ---
-        if self.mouse_attack_held:
-            self.player.attack(
-                self.camera_x,
-                self.camera_y,
-                self.zoom,
-                self.projectiles
-            )
-
-        # Get wall rects for the current room
-        wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
-        # Get room boundary as a pygame.Rect
-        room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
-        for proj in self.projectiles[:]:
-            proj.update(self.dt, self.enemies, wall_rects, room_rect)
-            if not getattr(proj, 'is_alive', True):
-                self.projectiles.remove(proj)
-        # --- UPDATE ENEMIES ---
-        for enemy in self.enemies:
-            enemy.engine = self  # Ensure each enemy can access engine context
-            enemy.update(self.dt, player_pos=(self.player.x, self.player.y), other_enemies=self.enemies, player=self.player)
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
@@ -703,94 +661,29 @@ class GameEngine:
         
         return dirty_rects
 
-    def run_intro_animation(self):
-        """Cinematic intro: fade-in, player falls, fade-out, then fade-in to gameplay."""
-        intro_duration = 1.5  # seconds
-        fade_duration = 0.8   # seconds for fade-in/out
-        elapsed = 0.0
-        start_y = -200  # Start far above room
-        end_y = self.player.y
-        self.player.y = start_y
-        light_radius = 120
-        clock = pygame.time.Clock()
-
-        # Fade-in from black before fall
-        fade_in_elapsed = 0.0
-        while fade_in_elapsed < fade_duration:
-            dt = clock.tick(120) / 1000.0
-            fade_in_elapsed += dt
-            fade_t = min(fade_in_elapsed / fade_duration, 1.0)
-            alpha = int(255 * (1.0 - fade_t))
-            self.render_intro(light_radius, 0.0)
-            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            fade_surface.fill((0, 0, 0, alpha))
-            self.screen.blit(fade_surface, (0, 0))
-            pygame.display.flip()
-
-        # Falling animation
-        while elapsed < intro_duration:
-            dt = clock.tick(120) / 1000.0
-            elapsed += dt
-            t = min(elapsed / intro_duration, 1.0)
-            eased_t = 1 - pow(1 - t, 3)
-            self.player.y = start_y + (end_y - start_y) * eased_t
-            self.render_intro(light_radius, t)
-        self.player.y = end_y
-
-        # Fade-out to black after landing
-        fade_out_elapsed = 0.0
-        while fade_out_elapsed < fade_duration:
-            dt = clock.tick(120) / 1000.0
-            fade_out_elapsed += dt
-            fade_t = min(fade_out_elapsed / fade_duration, 1.0)
-            alpha = int(255 * fade_t)
-            self.render_intro(light_radius, 1.0)
-            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            fade_surface.fill((0, 0, 0, alpha))
-            self.screen.blit(fade_surface, (0, 0))
-            pygame.display.flip()
-
-        # Fade-in to gameplay
-        fade_in_game_elapsed = 0.0
-        while fade_in_game_elapsed < fade_duration:
-            dt = clock.tick(120) / 1000.0
-            fade_in_game_elapsed += dt
-            fade_t = min(fade_in_game_elapsed / fade_duration, 1.0)
-            alpha = int(255 * (1.0 - fade_t))
-            self.render_intro(light_radius, 1.0)
-            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            fade_surface.fill((0, 0, 0, alpha))
-            self.screen.blit(fade_surface, (0, 0))
-            pygame.display.flip()
-
-    def render_intro(self, light_radius, t):
-        """Render the intro animation scene with falling player and light, no UI."""
-        current_room = self.dungeon.get_current_room()
-        self.screen.fill((0, 0, 0))
-        current_room.render(self.screen, self.camera_x, self.camera_y)
-        # Draw a radial light at player position, growing as player falls
-        px = int(self.player.x - self.camera_x + self.player.size // 2)
-        py = int(self.player.y - self.camera_y + self.player.size // 2)
-        radius = int(light_radius * (0.5 + 0.5 * t))
-        self.cut_radial_light(self.screen, (px, py), radius, max_alpha=180)
-        # Draw player
-        self.player.render(self.screen, self.camera_x, self.camera_y, [current_room], zoom=self.zoom)
-        # Do NOT draw UI or HUD here
-        pygame.display.flip()
-
     def run(self):
-        self.run_intro_animation()
+        self.run_intro_cutscene()
         self.tutorial_step = 0
         self.tutorial_phrases = [
             "WASD to move, Shift to sprint.",
             "Press E to pick up weapon, Q to drop."
         ]
+
+        accumulated_pause_time = 0  # Tempo total gasto em pausas
+        
         while self.running:
+            # Se estiver em pause, não atualize nada
+            if self.is_paused:
+                pygame.time.wait(100)  # Reduz consumo de CPU
+                continue
+                
+            # Handle eventos (inclui verificação de pause)
             self.handle_events()
-            self.update()
+            
+            # Atualiza o jogo com dt ajustado
+            dt = self.clock.tick(360) / 1000.0
+            self.update(dt)
             self.render()
-            self.clock.tick(360)
-        pygame.quit()
 
     def handle_events(self):
         for event in pygame.event.get():
@@ -813,17 +706,27 @@ class GameEngine:
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self.mouse_attack_held = False
 
-    def update(self):
-        self.dt = self.clock.get_time() / 1000.0  # seconds
+    def update(self, dt):
+        if getattr(self, "in_cutscene", False):
+            # still update lightweight things the cutscene expects (optional)
+            return
+
+        # Não atualiza nada se estiver pausado
+        if self.is_paused:
+            return
+            
+        self.dt = dt  # Atualiza o delta time global
+        current_room = self.dungeon.get_current_room()
         current_index = self.dungeon.current_room_index
         adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
 
-        # Always update self.enemies to current room's enemies
-        current_room = self.dungeon.get_current_room()
-        self.enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
-
-        # move player
-        self.player.update(rooms=adjacent_rooms)
+        # Atualizações do jogador
+        self.player.update(rooms=adjacent_rooms, dt=dt, enemies=self.enemies)
+        
+        # Atualiza inimigos com dt explícito
+        for enemy in self.enemies:
+            enemy.update(dt, player_pos=(self.player.x, self.player.y), 
+                         other_enemies=self.enemies, player=self.player)
 
         # update room based on player position (bounding box detection)
         if self.mouse_attack_held:
@@ -844,8 +747,8 @@ class GameEngine:
 
         # update camera to follow player
         self._update_camera()
-        self.update_crosshair(self.dt)
-        self.update_crosshair_particles(self.dt)
+        self.update_crosshair(dt)
+        self.update_crosshair_particles(dt)
 
         # --- UPDATE PROJECTILES ---
         if self.mouse_attack_held:
@@ -861,13 +764,16 @@ class GameEngine:
         # Get room boundary as a pygame.Rect
         room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
         for proj in self.projectiles[:]:
-            proj.update(self.dt, self.enemies, wall_rects, room_rect)
+            # ADD PAUSE CHECK HERE
+            if not self.is_paused:
+                proj.update(self.dt, self.enemies, wall_rects, room_rect)
             if not getattr(proj, 'is_alive', True):
                 self.projectiles.remove(proj)
+                
         # --- UPDATE ENEMIES ---
         for enemy in self.enemies:
             enemy.engine = self  # Ensure each enemy can access engine context
-            enemy.update(self.dt, player_pos=(self.player.x, self.player.y), other_enemies=self.enemies, player=self.player)
+            # Enemy.update already has a pause check
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
@@ -908,7 +814,7 @@ class GameEngine:
 
 
 
-    def render(self):
+    def render(self, skip_ui=False, do_flip=True, ui_alpha=255):
         # Render the current room and all adjacent rooms
         current_room = self.dungeon.get_current_room()
         current_index = self.dungeon.current_room_index
@@ -1000,71 +906,92 @@ class GameEngine:
         else:
             self.screen.blit(virtual_surface, (0, 0))
 
-        # Render UI (always on top)
-        self.dungeon.render_ui(self.screen)
-        self.player.render_bars(self.screen, self.screen.get_height())
-        self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())
-        self.player.render_weapon_info_overlay(self.screen, self.camera_x, self.camera_y, self.room, self.zoom)
+        # ---- UI (only when skip_ui is False) ----
+        if not skip_ui:
+            # Create a temporary UI surface so we can control its overall alpha
+            ui_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            
+            # Render UI onto ui_surface (instead of self.screen)
+            self.dungeon.render_ui(ui_surface)
+            self.player.render_bars(ui_surface, ui_surface.get_height())
+            self.player.render_weapon_hud(ui_surface, ui_surface.get_width(), ui_surface.get_height())
+            self.player.render_weapon_info_overlay(ui_surface, self.camera_x, self.camera_y, self.room, self.zoom)
 
-        # Draw crosshair particles
-        for particle in self.crosshair_particles:
-            particle['pos'] += particle['velocity'] * self.dt
-            particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
-            color_with_alpha = (*particle['color'], particle['alpha'])
-            pygame.draw.circle(
-                particle_surface, 
-                color_with_alpha, 
-                (particle['radius'], particle['radius']), 
-                particle['radius'])
-            self.screen.blit(
-                particle_surface,
-                (particle['pos'].x - particle['radius'],
-                particle['pos'].y - particle['radius']))
+            # Draw crosshair particles onto ui_surface
+            for particle in self.crosshair_particles:
+                particle['pos'] += particle['velocity'] * getattr(self, 'dt', 0.0)
+                particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
+                color_with_alpha = (*particle['color'], particle['alpha'])
+                pygame.draw.circle(
+                    particle_surface, 
+                    color_with_alpha, 
+                    (particle['radius'], particle['radius']), 
+                    particle['radius'])
+                ui_surface.blit(
+                    particle_surface,
+                    (particle['pos'].x - particle['radius'],
+                    particle['pos'].y - particle['radius']))
 
-        mouse_pos = pygame.mouse.get_pos()
-        if abs(self.crosshair_scale - 1.0) > 0.01:
-            scaled_size = (int(self.current_crosshair.get_width() * self.crosshair_scale), 
-                        int(self.current_crosshair.get_height() * self.crosshair_scale))
-            scaled_crosshair = pygame.transform.scale(self.current_crosshair, scaled_size)
-            offset = (scaled_size[0] // 2, scaled_size[1] // 2)
-            self.screen.blit(scaled_crosshair, 
-                            (mouse_pos[0] - offset[0], 
-                            mouse_pos[1] - offset[1]))
+            # Crosshair (draw to ui_surface)
+            mouse_pos = pygame.mouse.get_pos()
+            if abs(self.crosshair_scale - 1.0) > 0.01:
+                scaled_size = (int(self.current_crosshair.get_width() * self.crosshair_scale), 
+                            int(self.current_crosshair.get_height() * self.crosshair_scale))
+                scaled_crosshair = pygame.transform.scale(self.current_crosshair, scaled_size)
+                offset = (scaled_size[0] // 2, scaled_size[1] // 2)
+                ui_surface.blit(scaled_crosshair, 
+                                (mouse_pos[0] - offset[0], 
+                                mouse_pos[1] - offset[1]))
+            else:
+                ui_surface.blit(self.current_crosshair, 
+                                (mouse_pos[0] - self.crosshair_offset[0], 
+                                mouse_pos[1] - self.crosshair_offset[1]))
+
+            # FPS monitor on ui_surface
+            if self.show_fps:
+                fps = self.clock.get_fps()
+                playerPos = self.player.x, self.player.y
+                fps_text = self.fps_font.render(f"FPS: {fps:.1f}", True, (255, 255, 0))
+                playerPos_text = self.fps_font.render(f"Player Pos: {playerPos}", True, (255, 255, 0))
+                ui_surface.blit(fps_text, (10, self.screen.get_height() - fps_text.get_height() - 10))
+                ui_surface.blit(playerPos_text, (10,  self.screen.get_height() - fps_text.get_height() - 30))
+
+            # Tutorial text below player on ui_surface
+            if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
+                tutorial_text = self.tutorial_phrases[self.tutorial_step]
+                font_tip = pygame.font.Font(None, 22)
+                font_space = pygame.font.Font(None, 18)
+                tip_surf = font_tip.render(tutorial_text, True, (255, 255, 255))
+                space_surf = font_space.render("Press SPACE for next tip", True, (200, 200, 200))
+                px = int((self.player.x - self.camera_x + self.player.size // 2) * self.zoom)
+                py = int((self.player.y - self.camera_y + self.player.size) * self.zoom)
+                tip_rect = tip_surf.get_rect(center=(px, py + int(22 * self.zoom)))
+                space_rect = space_surf.get_rect(center=(px, tip_rect.bottom + int(14 * self.zoom)))
+                ui_surface.blit(tip_surf, tip_rect)
+                ui_surface.blit(space_surf, space_rect)
+
+            # If alpha < 255, set and blit with that alpha, otherwise blit normally
+            if ui_alpha < 255:
+                # copy before set_alpha to avoid changing original surface state elsewhere
+                tmp = ui_surface.copy()
+                tmp.set_alpha(ui_alpha)
+                self.screen.blit(tmp, (0, 0))
+            else:
+                self.screen.blit(ui_surface, (0, 0))
+
+        # --- only flip / update when requested ---
+        if do_flip:
+            pygame.display.flip()
+
+            dirty_rects = self.calculate_dirty_rects()
+            for rect in dirty_rects:
+                pygame.display.update(rect)
+            self.last_drawn_rects = dirty_rects
         else:
-            self.screen.blit(self.current_crosshair, 
-                            (mouse_pos[0] - self.crosshair_offset[0], 
-                            mouse_pos[1] - self.crosshair_offset[1]))
+            # When not flipping, avoid stale dirty-rect updates
+            self.last_drawn_rects = []
 
-        # FPS monitor
-        if self.show_fps:
-            fps = self.clock.get_fps()
-            playerPos = self.player.x, self.player.y
-            fps_text = self.fps_font.render(f"FPS: {fps:.1f}", True, (255, 255, 0))
-            playerPos_text = self.fps_font.render(f"Player Pos: {playerPos}", True, (255, 255, 0))
-            self.screen.blit(fps_text, (10, self.screen.get_height() - fps_text.get_height() - 10))
-            self.screen.blit(playerPos_text, (10,  self.screen.get_height() - fps_text.get_height() - 30))
 
-        # --- TUTORIAL TEXT BELOW PLAYER ---
-        if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
-            tutorial_text = self.tutorial_phrases[self.tutorial_step]
-            font_tip = pygame.font.Font(None, 22)
-            font_space = pygame.font.Font(None, 18)
-            tip_surf = font_tip.render(tutorial_text, True, (255, 255, 255))
-            space_surf = font_space.render("Press SPACE for next tip", True, (200, 200, 200))
-            # Calculate player position on screen, accounting for zoom
-            px = int((self.player.x - self.camera_x + self.player.size // 2) * self.zoom)
-            py = int((self.player.y - self.camera_y + self.player.size) * self.zoom)
-            tip_rect = tip_surf.get_rect(center=(px, py + int(22 * self.zoom)))
-            space_rect = space_surf.get_rect(center=(px, tip_rect.bottom + int(14 * self.zoom)))
-            self.screen.blit(tip_surf, tip_rect)
-            self.screen.blit(space_surf, space_rect)
-
-        pygame.display.flip()
-
-        dirty_rects = self.calculate_dirty_rects()
-        for rect in dirty_rects:
-            pygame.display.update(rect)
-        self.last_drawn_rects = dirty_rects
 
     def calculate_dirty_rects(self):
         """Calculate areas that need redrawing"""
@@ -1083,235 +1010,281 @@ class GameEngine:
         
         return dirty_rects
 
-    def run_intro_animation(self):
-        """Cinematic intro: dramatic camera pan, player entrance, and smooth transition to gameplay"""
-        # Phase 1: Camera pan through dungeon
-        camera_path = self._create_camera_path()
-        pan_duration = 3.0
-        pan_elapsed = 0.0
-        
-        # Phase 2: Player entrance
-        entrance_duration = 1.5
-        entrance_elapsed = 0.0
-        start_y = -200
-        end_y = self.player.y
-        
-        # Phase 3: Transition to gameplay
-        fade_duration = 1.0
-        fade_elapsed = 0.0
-        
-        clock = pygame.time.Clock()
-        current_phase = 1
+    def run_intro_cutscene(self, floor_number=1, message="Prepare for the journey ahead...", post_delay=0.6, overlay_fade_duration=0.5):
+        """Cutscene state machine with overlay fade-out at end.
+        Phases: fade_in -> fall -> bounce -> bars_slide -> ui_fade -> post_delay -> overlay_fade_out -> done.
+        """
+        import math, random, time
+
+        self.in_cutscene = True
+
+        # Fonts / text
+        title_font = pygame.font.Font("game/assets/fonts/CinzelDecorative-Regular.ttf", 72)
+        subtitle_font = pygame.font.Font(None, 36)
+        title = title_font.render(f"FLOOR {floor_number}", True, (255, 255, 255))
+        subtitle = subtitle_font.render(message, True, (200, 200, 200))
+
+        # starfield (we'll draw stars into overlay surface so they can fade)
+        stars = [(random.uniform(0, self.width), random.uniform(0, self.height),
+                random.randint(1, 3), random.uniform(0.2, 1.0)) for _ in range(120)]
+
+        # cinematic bars
+        start_bar_h = 140.0
+        min_bar_h = 60.0
+
+        # spawn & start pos
+        spawn_x, spawn_y = self.dungeon.get_player_spawn_position()
+        start_y = spawn_y - 900.0
+        self.player.x = spawn_x
         self.player.y = start_y
-        
-        # Lighting effects
-        light_radius = 0
-        max_light_radius = 180
-        dust_particles = []
-        
-        while current_phase <= 3:
+
+        # initial camera (and force cutscene camera for first frame)
+        self.camera_x = self.player.x - self.width // 2
+        self.camera_y = self.player.y - self.height // 2
+        self._update_camera_cutscene()
+
+        # timings
+        fade_duration = 1.2
+        fall_duration = 2.2
+        landing_bounce_duration = 0.35
+        bars_slide_duration = 0.6
+        ui_fade_duration = 0.7
+
+        clock = pygame.time.Clock()
+
+        # state machine
+        phase = "fade_in"
+        phase_start = pygame.time.get_ticks() / 1000.0
+        landed = False
+        bounce_start = None
+        bars_start = None
+        ui_fade_start = None
+        ui_alpha = 0
+        current_bar_h = start_bar_h
+        overlay_alpha = 255  # controls full overlay (stars, bars, text) in final fade-out
+
+        while True:
             dt = clock.tick(60) / 1000.0
-            
-            # Phase 1: Camera pan through dungeon
-            if current_phase == 1:
-                pan_elapsed += dt
-                t = min(pan_elapsed / pan_duration, 1.0)
-                
-                # Smooth camera movement along path
-                self.camera_x, self.camera_y = self._get_camera_position(camera_path, t)
-                
-                # Render dungeon during pan
-                self._render_pan_phase()
-                
-                # Transition to next phase
+            self.dt = dt
+
+            # input handling (quit + skip)
+            skip = False
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    self.running = False
+                    self.in_cutscene = False
+                    return
+                elif ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                    skip = True
+
+            now = pygame.time.get_ticks() / 1000.0
+            phase_t = now - phase_start
+
+            # skip shortcut: jump forward to appropriate phases
+            if skip:
+                if phase in ("fade_in", "fall", "bounce"):
+                    self.player.y = spawn_y
+                    landed = True
+                    bounce_start = None
+                    bars_start = now
+                    ui_fade_start = now + 0.12
+                    phase = "bars_slide"
+                    phase_start = now
+                elif phase == "bars_slide":
+                    current_bar_h = min_bar_h
+                    bars_start = phase_start
+                    ui_fade_start = now
+                    phase = "ui_fade"
+                    phase_start = now
+                elif phase == "ui_fade":
+                    ui_alpha = 255
+                    phase = "post_delay"
+                    phase_start = now
+                    post_end = now + float(post_delay)
+                elif phase == "post_delay":
+                    # go straight to overlay fade-out
+                    phase = "overlay_fade_out"
+                    phase_start = now
+                    overlay_start = now
+
+            # --- Phase logic ---
+            if phase == "fade_in":
+                text_alpha = int(255 * min(1.0, phase_t / fade_duration))
+                if phase_t >= fade_duration:
+                    phase = "fall"
+                    phase_start = now
+
+            elif phase == "fall":
+                t = min(1.0, phase_t / fall_duration)
+                eased = 1 - (1 - t) ** 3
+                self.player.y = start_y + (spawn_y - start_y) * eased
+                text_alpha = 255
                 if t >= 1.0:
-                    current_phase = 2
-                    pan_elapsed = 0
-                    
-            # Phase 2: Player entrance
-            elif current_phase == 2:
-                entrance_elapsed += dt
-                t = min(entrance_elapsed / entrance_duration, 1.0)
-                
-                # Ease-out bounce for more dramatic landing
-                eased_t = self._ease_out_bounce(t)
-                self.player.y = start_y + (end_y - start_y) * eased_t
-                
-                # Growing light effect
-                light_radius = int(max_light_radius * t)
-                
-                # Create dust particles on landing
-                if t > 0.8 and len(dust_particles) < 30:
-                    dust_particles.extend(self._create_dust_cloud(
-                        self.player.x + self.player.size//2,
-                        self.player.y + self.player.size
-                    ))
-                
-                # Update dust particles
-                for p in dust_particles[:]:
-                    p['time'] += dt
-                    if p['time'] > p['lifetime']:
-                        dust_particles.remove(p)
-                
-                # Render entrance with effects
-                self._render_entrance_phase(light_radius, dust_particles)
-                
-                # Transition to next phase
+                    phase = "bounce"
+                    phase_start = now
+                    bounce_start = now
+                    self._start_camera_shake(0.4, 7)
+
+            elif phase == "bounce":
+                bt = (now - bounce_start) / landing_bounce_duration if bounce_start else 1.0
+                if bt < 1.0:
+                    overshoot = 24.0
+                    damp = math.exp(-4 * bt)
+                    self.player.y = spawn_y + overshoot * math.cos(bt * math.pi * 2) * damp
+                else:
+                    self.player.y = spawn_y
+                    phase = "bars_slide"
+                    phase_start = now
+                    bars_start = now
+                    ui_fade_start = now + 0.12
+                text_alpha = 255
+
+            elif phase == "bars_slide":
+                t = min(1.0, (now - bars_start) / bars_slide_duration)
+                slide = 1 - (1 - t) * (1 - t)
+                current_bar_h = start_bar_h * (1 - slide) + min_bar_h * slide
+                text_alpha = 255
                 if t >= 1.0:
-                    current_phase = 3
-                    entrance_elapsed = 0
-                    
-            # Phase 3: Fade to gameplay
-            elif current_phase == 3:
-                fade_elapsed += dt
-                fade_t = min(fade_elapsed / fade_duration, 1.0)
-                
-                # Render gameplay but with fade overlay
-                self.update()
-                self.render()
-                
-                # Create fade overlay
-                overlay_alpha = int(255 * (1.0 - fade_t))
-                fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-                fade_surface.fill((0, 0, 0, overlay_alpha))
-                self.screen.blit(fade_surface, (0, 0))
-                
-                pygame.display.flip()
-                
-                # End intro
-                if fade_t >= 1.0:
+                    current_bar_h = min_bar_h
+                    phase = "ui_fade"
+                    phase_start = now
+                    ui_fade_start = now
+
+            elif phase == "ui_fade":
+                t = min(1.0, (now - ui_fade_start) / ui_fade_duration) if ui_fade_start else 1.0
+                ui_alpha = int(255 * t)
+                text_alpha = 255
+                if t >= 1.0:
+                    phase = "post_delay"
+                    phase_start = now
+                    post_end = now + float(post_delay)
+
+            elif phase == "post_delay":
+                text_alpha = 255
+                ui_alpha = 255
+                current_bar_h = min_bar_h
+                if now >= post_end:
+                    phase = "overlay_fade_out"
+                    phase_start = now
+                    overlay_start = now
+
+            elif phase == "overlay_fade_out":
+                # fade overlay_alpha from 255 -> 0
+                t = min(1.0, (now - overlay_start) / overlay_fade_duration)
+                overlay_alpha = int(255 * (1.0 - t))
+                # keep UI visible underneath
+                text_alpha = int(255 * (overlay_alpha / 255))  # text fades with overlay
+                ui_alpha = 255
+                current_bar_h = min_bar_h
+                if t >= 1.0:
+                    # overlay fully gone -> done
                     break
 
-    def _create_camera_path(self):
-        """Create an interesting camera path through the dungeon"""
-        path = []
-        current_room = self.dungeon.get_current_room()
-        
-        # Start point: show the whole dungeon
-        path.append((current_room.x - 300, current_room.y - 200))
-        
-        # Mid point: focus on an interesting feature
-        path.append((current_room.x + current_room.width//3, current_room.y + current_room.height//3))
-        
-        # End point: where player will appear
-        path.append((self.player.x - self.width//2, self.player.y - self.height//2))
-        
-        return path
+            else:
+                text_alpha = 255
+                ui_alpha = 255
 
-    def _get_camera_position(self, path, t):
-        """Get smooth camera position along path"""
-        if t < 0.5:
-            segment_t = t * 2
-            start_x, start_y = path[0]
-            end_x, end_y = path[1]
-        else:
-            segment_t = (t - 0.5) * 2
-            start_x, start_y = path[1]
-            end_x, end_y = path[2]
-        
-        # Cubic easing for smooth movement
-        eased_t = segment_t * segment_t * (3 - 2 * segment_t)
-        return (
-            start_x + (end_x - start_x) * eased_t,
-            start_y + (end_y - start_y) * eased_t
-        )
+            # --- Camera updates ---
+            use_cutscene_camera = phase in ("fade_in", "fall", "bounce", "bars_slide")
+            if use_cutscene_camera:
+                prev_smooth = getattr(self, "camera_smoothing", 0.1)
+                self.camera_smoothing = max(prev_smooth, 0.28)
+                self._update_camera_cutscene()
+            else:
+                self.camera_smoothing = getattr(self, "camera_smoothing", 0.1)
+                self._update_camera()
 
-    def _ease_out_bounce(self, t):
-        """Bounce easing function for landing effect"""
-        if t < 1/2.75:
-            return 7.5625*t*t
-        elif t < 2/2.75:
-            t -= 1.5/2.75
-            return 7.5625*t*t + 0.75
-        elif t < 2.5/2.75:
-            t -= 2.25/2.75
-            return 7.5625*t*t + 0.9375
-        else:
-            t -= 2.625/2.75
-            return 7.5625*t*t + 0.984375
+            # apply non-blocking camera shake
+            shake_x, shake_y = self._apply_camera_shake(dt)
+            cam_x_saved, cam_y_saved = self.camera_x, self.camera_y
+            self.camera_x += shake_x
+            self.camera_y += shake_y
 
-    def _create_dust_cloud(self, x, y):
-        """Create dust particle effects for landing"""
-        particles = []
-        for _ in range(8):
-            particles.append({
-                'x': x,
-                'y': y,
-                'size': random.randint(3, 8),
-                'speed': random.uniform(0.5, 2.0),
-                'angle': random.uniform(0, math.pi*2),
-                'lifetime': random.uniform(0.5, 1.2),
-                'time': 0,
-                'color': (200, 180, 150)
-            })
-        return particles
+            # --- Render frame (world + UI if appropriate) ---
+            render_ui_now = (phase in ("ui_fade", "post_delay", "overlay_fade_out"))
+            ui_alpha_to_pass = ui_alpha if render_ui_now else 0
+            self.render(skip_ui=not render_ui_now, do_flip=False, ui_alpha=ui_alpha_to_pass)
 
-    def _render_pan_phase(self):
-        """Render during camera pan phase"""
-        self.screen.fill((0, 0, 0))
-        current_room = self.dungeon.get_current_room()
-        current_room.render(self.screen, self.camera_x, self.camera_y)
-        
-        # Add dramatic lighting
-        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 180))
-        self.screen.blit(overlay, (0, 0))
-        
-        # Add vignette effect
-        vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        pygame.draw.circle(vignette, (0, 0, 0, 0), 
-                        (self.width//2, self.height//2), 
-                        self.width//3)
-        pygame.draw.circle(vignette, (0, 0, 0, 200), 
-                        (self.width//2, self.height//2), 
-                        self.width//2, self.width//3)
-        self.screen.blit(vignette, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-        
+            # draw cinematic overlay into a temp surface so we can control overall overlay alpha at the end
+            overlay_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+
+            # starfield — draw onto overlay_surf
+            for (sx, sy, size, depth) in stars:
+                px = int((sx - (self.camera_x * 0.2 * depth)) % (self.width + 50))
+                py = int((sy - (self.camera_y * 0.2 * depth)) % (self.height + 50))
+                pygame.draw.circle(overlay_surf, (220, 220, 255, 255), (px, py), size)
+
+            # cinematic bars on overlay_surf
+            pygame.draw.rect(overlay_surf, (0, 0, 0, 255), (0, 0, self.width, int(current_bar_h)))
+            pygame.draw.rect(overlay_surf, (0, 0, 0, 255),
+                            (0, self.height - int(current_bar_h), self.width, int(current_bar_h)))
+
+            # prepare text surfaces with text_alpha and blit onto overlay_surf
+            title.set_alpha(int(max(0, min(255, text_alpha))))
+            subtitle.set_alpha(int(max(0, min(255, text_alpha))))
+            title_rect = title.get_rect(center=(self.width // 2, self.height // 2 - 40))
+            subtitle_rect = subtitle.get_rect(center=(self.width // 2, self.height // 2 + 20))
+            overlay_surf.blit(title, title_rect)
+            overlay_surf.blit(subtitle, subtitle_rect)
+
+            # Now apply overlay_alpha if we're in overlay_fade_out; for earlier phases overlay_alpha == 255
+            if overlay_alpha < 255:
+                tmp = overlay_surf.copy()
+                tmp.set_alpha(overlay_alpha)
+                self.screen.blit(tmp, (0, 0))
+            else:
+                # direct blit (already has per-pixel alpha)
+                self.screen.blit(overlay_surf, (0, 0))
+
+            # restore camera (remove shake)
+            self.camera_x, self.camera_y = cam_x_saved, cam_y_saved
+
+            # single flip per frame
+            pygame.display.flip()
+
+        # final cleanup: ensure exact final frame and release cutscene lock
+        self._update_camera()
+        self.render(skip_ui=False, do_flip=True, ui_alpha=255)
         pygame.display.flip()
+        pygame.event.pump()
+        self.in_cutscene = False
 
-    def _render_entrance_phase(self, light_radius, dust_particles):
-        """Render during player entrance phase"""
-        self.screen.fill((0, 0, 0))
-        current_room = self.dungeon.get_current_room()
-        current_room.render(self.screen, self.camera_x, self.camera_y)
-        
-        # Draw player with landing animation
-        self.player.render(self.screen, self.camera_x, self.camera_y, [current_room], zoom=self.zoom)
-        
-        # Draw light around player
-        px = int(self.player.x - self.camera_x + self.player.size // 2)
-        py = int(self.player.y - self.camera_y + self.player.size // 2)
-        self.cut_radial_light(self.screen, (px, py), light_radius, max_alpha=180)
-        
-        # Draw dust particles
-        for p in dust_particles:
-            alpha = int(255 * (1 - p['time']/p['lifetime']))
-            size = int(p['size'] * (1 - p['time']/(p['lifetime']*2)))
-            if size < 1:
-                continue
-                
-            # Move particle
-            p['x'] += math.cos(p['angle']) * p['speed'] * 10
-            p['y'] += math.sin(p['angle']) * p['speed'] * 10
-            
-            # Convert to screen coords
-            screen_x = int(p['x'] - self.camera_x)
-            screen_y = int(p['y'] - self.camera_y)
-            
-            # Draw particle
-            particle_surf = pygame.Surface((size*2, size*2), pygame.SRCALPHA)
-            color = (*p['color'], alpha)
-            pygame.draw.circle(particle_surf, color, (size, size), size)
-            self.screen.blit(particle_surf, (screen_x - size, screen_y - size))
-        
-        # Apply vignette effect
-        vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        pygame.draw.circle(vignette, (0, 0, 0, 0), 
-                        (self.width//2, self.height//2), 
-                        self.width//3)
-        pygame.draw.circle(vignette, (0, 0, 0, 150), 
-                        (self.width//2, self.height//2), 
-                        self.width//2, self.width//3)
-        self.screen.blit(vignette, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-        
-        pygame.display.flip()
+
+
+    def _start_camera_shake(self, duration, intensity):
+        """Start a non-blocking camera shake (frames apply via _apply_camera_shake)."""
+        self._camera_shake_timer = duration
+        self._camera_shake_intensity = intensity
+
+    def _apply_camera_shake(self, dt):
+        """Return (offset_x, offset_y) for current shake state and decrease timer."""
+        import math, random
+        if getattr(self, "_camera_shake_timer", 0.0) > 0.0:
+            self._camera_shake_timer -= dt
+            intensity = getattr(self, "_camera_shake_intensity", 0)
+            # decaying intensity
+            t = max(0.0, self._camera_shake_timer)
+            decay = t / (t + 0.0001)  # simple decay factor
+            ang = random.random() * math.tau
+            ox = int(math.cos(ang) * intensity * decay)
+            oy = int(math.sin(ang) * intensity * decay)
+            return ox, oy
+        return 0, 0
+
+    def _update_camera_cutscene(self, smoothing=None):
+        """Center camera on player without room-clamping (used only during cutscene)."""
+        player_center_x = self.player.x + self.player.size // 2
+        player_center_y = self.player.y + self.player.size // 2
+
+        viewport_width = self.width / self.zoom
+        viewport_height = self.height / self.zoom
+
+        target_camera_x = player_center_x - viewport_width / 2
+        target_camera_y = player_center_y - viewport_height / 2
+
+        if smoothing is None:
+            smoothing = max(0.05, min(0.5, getattr(self, "camera_smoothing", 0.1) * 2.5))
+
+        # smooth-damp toward target
+        self.camera_x += (target_camera_x - self.camera_x) * smoothing
+        self.camera_y += (target_camera_y - self.camera_y) * smoothing

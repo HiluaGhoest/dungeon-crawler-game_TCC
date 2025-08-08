@@ -157,6 +157,7 @@ class SteelSword(MeleeWeapon):
         self.trail_lifetime = 0.1  # seconds
         self.trail_color = (180, 0, 255)
         self.last_tip_pos = None
+        self.swing_angle = None  # ângulo congelado do swing
 
     def attack(self, player_center, angle):
         if not self.can_attack():
@@ -165,6 +166,7 @@ class SteelSword(MeleeWeapon):
         self.is_swinging = True
         self.swing_start_time = time.time()
         self.swing_phase = 1  # start swing forward
+        self.swing_angle = angle  # salva o ângulo do swing
         print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
         return True
 
@@ -215,8 +217,13 @@ class SteelSword(MeleeWeapon):
         origin_x = self.origin[0] * (scale_width / original_rect.width)
         origin_y = self.origin[1] * (scale_height / original_rect.height)
 
-        adjusted_angle = math.degrees(angle) + 90
-        angle_rad = math.radians(math.degrees(angle))
+        # Use swing_angle se estiver swingando
+        use_angle = angle
+        if self.swing_phase != 0 and self.swing_angle is not None:
+            use_angle = self.swing_angle
+
+        adjusted_angle = math.degrees(use_angle) + 90
+        angle_rad = math.radians(math.degrees(use_angle))
         flip = math.cos(angle_rad) < 0
         if flip:
             scaled_sprite = pygame.transform.flip(scaled_sprite, True, False)

@@ -271,11 +271,15 @@ class Player:
         elif isinstance(weapon, MeleeWeapon):
             # Damage enemies in range and arc
             hit = False
+            # --- Corrige para aplicar dano durante a fase 2 do swing ---
             if enemies:
                 attack_range = getattr(weapon, 'attack_range', 80)
                 attack_angle = angle
                 arc_width = math.radians(70)  # 70 degree arc
                 damage = getattr(weapon, 'damage', 10)
+                # Adiciona controle para não atingir o mesmo inimigo mais de uma vez por swing
+                if not hasattr(weapon, '_already_hit_enemies') or weapon.swing_phase == 0:
+                    weapon._already_hit_enemies = set()
                 for enemy in enemies:
                     dx = enemy.x + enemy.size/2 - player_center[0]
                     dy = enemy.y + enemy.size/2 - player_center[1]
@@ -285,10 +289,16 @@ class Player:
                         diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
                         if diff < arc_width/2:
                             if hasattr(weapon, 'can_deal_damage') and weapon.can_deal_damage():
-                                enemy.take_damage(damage)
-                                # Floating damage handled in enemy.take_damage
-                                print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
-                                hit = True
+                                # Só aplica dano se ainda não atingiu esse inimigo nesse swing
+                                if enemy not in weapon._already_hit_enemies:
+                                    enemy.take_damage(damage)
+                                    print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
+                                    weapon._already_hit_enemies.add(enemy)
+                                    hit = True
+                # Limpa lista de inimigos atingidos ao terminar o swing
+                if weapon.swing_phase == 0 and hasattr(weapon, '_already_hit_enemies'):
+                    weapon._already_hit_enemies.clear()
+            # O ataque só inicia o swing, o dano é processado acima
             return weapon.attack(player_center, angle) or hit
         return False
 
@@ -674,7 +684,7 @@ class Player:
         )
 
 
-    def update(self, rooms=None, dt=0.016 ):
+    def update(self, rooms=None, dt=0.016, enemies=None ):
         self.handle_input(rooms)
         # Update immunity timer
         if self.immunity_timer > 0.0:
@@ -719,6 +729,33 @@ class Player:
         weapon = self.get_active_weapon()
         if weapon and hasattr(weapon, 'update'):
             weapon.update(dt)
+
+        # --- Aplica dano durante a fase 2 do swing, mesmo após o clique ---
+        if enemies and weapon and hasattr(weapon, 'can_deal_damage') and weapon.can_deal_damage():
+            attack_range = getattr(weapon, 'attack_range', 80)
+            damage = getattr(weapon, 'damage', 10)
+            # Usa o ângulo do swing salvo na arma
+            attack_angle = getattr(weapon, 'swing_angle', None)
+            if attack_angle is None:
+                attack_angle = self.get_mouse_angle()
+            arc_width = math.radians(70)
+            player_center = (self.x, self.y)
+            if not hasattr(weapon, '_already_hit_enemies') or weapon.swing_phase == 0:
+                weapon._already_hit_enemies = set()
+            for enemy in enemies:
+                dx = enemy.x + enemy.size/2 - player_center[0]
+                dy = enemy.y + enemy.size/2 - player_center[1]
+                dist = math.hypot(dx, dy)
+                if dist <= attack_range:
+                    angle_to_enemy = math.atan2(dy, dx)
+                    diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
+                    if diff < arc_width/2:
+                        if enemy not in weapon._already_hit_enemies:
+                            enemy.take_damage(damage)
+                            print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
+                            weapon._already_hit_enemies.add(enemy)
+            if weapon.swing_phase == 0 and hasattr(weapon, '_already_hit_enemies'):
+                weapon._already_hit_enemies.clear()
 
         # Atualiza bob dos olhos
         self.eye_bob_timer += dt

@@ -1,3 +1,4 @@
+import random
 import pygame
 import math
 import time
@@ -41,8 +42,10 @@ class Enemy:
         # Spawning animation
         self.spawning = True
         self.spawn_timer = 0.0
-        self.spawn_duration = 2.5  # seconds
+        self.spawn_duration = random.uniform(0.5, 4.0)
         self.removed = False
+
+        self.damage = 5
 
     def _get_rect(self):
         return pygame.Rect(self.x, self.y, self.size, self.size)
@@ -65,7 +68,6 @@ class Enemy:
         self.flash_timer = self.flash_duration
         # Add blood splatter effect and knockback
         if hit_direction is not None:
-            import random, math
             for _ in range(random.randint(3, 6)):
                 angle = math.atan2(hit_direction[1], hit_direction[0]) + random.uniform(-0.5, 0.5)
                 speed = random.uniform(4, 8)
@@ -87,18 +89,54 @@ class Enemy:
             self.die()
 
     def die(self):
-        # Start death animation (actual removal will happen after animation)
+        # Pixel Explosion Death Animation
         self.is_dead = True
         self.death_timer = 0.0
-        self.death_duration = 0.5  # seconds
+        self.death_duration = 0.5  # tempo total da animação
+        self.death_flash_frames = 2  # frames de flash branco
+        self.death_chunks = []
+        n_chunks = random.randint(4, 6)
+        base_color = tuple(max(0, int(c * 0.8)) for c in self.color)  # cor mais escura
+        center_x = self.x + self.size // 2
+        center_y = self.y + self.size // 2
+        for i in range(n_chunks):
+            angle = 2 * math.pi * i / n_chunks + random.uniform(-0.2, 0.2)
+            speed = random.uniform(5, 11)
+            chunk_size = self.size // 3
+            chunk_x = center_x - chunk_size // 2
+            chunk_y = center_y - chunk_size // 2
+            dx = math.cos(angle) * speed
+            dy = math.sin(angle) * speed
+            self.death_chunks.append({
+                'x': chunk_x,
+                'y': chunk_y,
+                'dx': dx,
+                'dy': dy,
+                'size': chunk_size,
+                'color': base_color,
+                'alpha': 255,
+                'timer': 0.0
+            })
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
-        # Death animation timer
+        if player and hasattr(player, 'engine') and player.engine.is_paused:
+            return
+        # Death animation: pixel explosion
         if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer'):
             self.death_timer += dt
+            # Flash branco nos primeiros frames
+            if hasattr(self, 'death_flash_frames') and self.death_timer < 0.05 * self.death_flash_frames:
+                pass  # só flash, chunks não se movem
+            elif hasattr(self, 'death_chunks'):
+                for chunk in self.death_chunks:
+                    chunk['x'] += chunk['dx'] * dt * 60
+                    chunk['y'] += chunk['dy'] * dt * 60
+                    chunk['timer'] += dt
+                    # Fade out
+                    chunk['alpha'] = max(0, 255 - int((chunk['timer'] / self.death_duration) * 255))
             if self.death_timer >= self.death_duration:
                 self.death_timer = self.death_duration
-                # Remove enemy from current room/enemy list after animation
+                # Remove enemy do room/enemy list após animação
                 room = getattr(self, 'room', None)
                 if room and hasattr(room, 'enemies') and self in room.enemies:
                     room.enemies.remove(self)
@@ -155,7 +193,6 @@ class Enemy:
 
         # IA: Persegue o jogador se player_pos for fornecido
         if player_pos is not None:
-            import math
             px, py = player_pos
             dx = px - self.x
             dy = py - self.y
@@ -215,16 +252,19 @@ class Enemy:
             self.next_pos = (new_x, new_y)
             # Checa colisão com outros inimigos (usando as posições futuras já salvas)
             can_move = True
+            # Só verifica colisão com inimigos próximos (raio de 1.5x tamanho)
             if other_enemies:
+                min_dist = self.size * 1.5
                 for other in other_enemies:
                     if other is self:
                         continue
-                    # Use a posição futura do outro, se já calculada
                     other_future_x, other_future_y = getattr(other, 'next_pos', (other.x, other.y))
-                    other_rect = pygame.Rect(other_future_x, other_future_y, other.size, other.size)
-                    if new_rect.colliderect(other_rect):
-                        can_move = False
-                        break
+                    dist_to_other = math.hypot(new_x - other_future_x, new_y - other_future_y)
+                    if dist_to_other < min_dist:
+                        other_rect = pygame.Rect(other_future_x, other_future_y, other.size, other.size)
+                        if new_rect.colliderect(other_rect):
+                            can_move = False
+                            break
             # Checa colisão com jogador
             player_rect = pygame.Rect(px, py, self.size, self.size)
             if new_rect.colliderect(player_rect):
@@ -232,7 +272,7 @@ class Enemy:
                 if player is not None:
                     # Enemy deals damage to player on collision
                     if hasattr(player, 'take_damage'):
-                        player.take_damage(1)  # You can adjust damage value as needed
+                        player.take_damage(self.damage)  # You can adjust damage value as needed
             # Só move se não houver colisão
             if can_move:
                 self.x = new_x
@@ -277,7 +317,6 @@ class Enemy:
         # Pegadas
         moved_dist = ((self.x - self._last_footprint_pos[0]) ** 2 + (self.y - self._last_footprint_pos[1]) ** 2) ** 0.5
         if moved_dist > self._footprint_distance:
-            import time, math
             offset = self.size // 4
             dx = self.x - self._last_footprint_pos[0]
             dy = self.y - self._last_footprint_pos[1]
@@ -292,7 +331,42 @@ class Enemy:
     def draw(self, surface, camera_x=0, camera_y=0, zoom=1.0):
         if getattr(self, 'removed', False):
             return
-        import pygame, time, math
+        # Death animation: pixel explosion
+        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer') and hasattr(self, 'death_chunks'):
+            # Flash branco nos primeiros frames
+            if self.death_timer < 0.05 * getattr(self, 'death_flash_frames', 2):
+                render_x = self.x - camera_x
+                render_y = self.y - camera_y
+                enemy_rect = pygame.Rect(render_x, render_y, self.size, self.size)
+                pygame.draw.rect(surface, (255, 255, 255, 255), enemy_rect, border_radius=6)
+            else:
+                for chunk in self.death_chunks:
+                    chunk_surf = pygame.Surface((chunk['size'], chunk['size']), pygame.SRCALPHA)
+                    pygame.draw.rect(chunk_surf, (*chunk['color'], chunk['alpha']), (0, 0, chunk['size'], chunk['size']))
+                    draw_x = int(chunk['x'] - camera_x)
+                    draw_y = int(chunk['y'] - camera_y)
+                    surface.blit(chunk_surf, (draw_x, draw_y))
+            # Render floating damage numbers mesmo durante a morte
+            font = pygame.font.SysFont('arial', 18, bold=True)
+            damage_lifetime = 0.7
+            damage_rise = 30
+            now = time.time()
+            for dmg in self.floating_damage[:]:
+                elapsed = now - dmg['timestamp']
+                if elapsed > damage_lifetime:
+                    self.floating_damage.remove(dmg)
+                    continue
+                alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
+                offset = int((elapsed / damage_lifetime) * damage_rise)
+                dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+                dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
+                dmg_surf.blit(dmg_text, (0, 0))
+                dmg_surf.set_alpha(alpha)
+                draw_x = int(dmg['x'] - camera_x - dmg_text.get_width() // 2)
+                draw_y = int(dmg['y'] - camera_y - 20 - offset)
+                surface.blit(dmg_surf, (draw_x, draw_y))
+            return
+        # ...restante do draw original...
         # --- Render blood splatters ---
         for splat in self.blood_splatters:
             alpha = max(0, 180 - int((splat['timer'] / splat['duration']) * 180))
@@ -338,17 +412,10 @@ class Enemy:
             draw_y = int(dmg['y'] - camera_y - 20 - offset)
             surface.blit(dmg_surf, (draw_x, draw_y))
 
-        # --- Spawning and death animation: scale up/down ---
+        # --- Spawning animation: scale up ---
         spawn_scale = 1.0
-        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer'):
-            # Death animation: play spawn animation backwards (ease-in cubic)
-            t = min(self.death_timer / self.death_duration, 1.0)
-            # Ease-in cubic for smooth pop-out
-            spawn_scale = 0.2 + 0.8 * pow(1-t, 3)
-            death_alpha = int(255 * pow(1-t, 3))
-        elif self.spawning:
+        if self.spawning:
             t = min(self.spawn_timer / self.spawn_duration, 1.0)
-            # Ease-out cubic for smooth pop-in
             spawn_scale = 0.2 + 0.8 * (1 - pow(1-t, 3))
             death_alpha = 255
         else:
@@ -377,19 +444,20 @@ class Enemy:
         else:
             pygame.draw.rect(surface, (*self.color, outline_alpha), enemy_rect.inflate(-6, -6), border_radius=6)
 
-        # --- Render eyes (pretos e pequenos, estilo original) ---
-        eye_size = max(2, int(self.size // 8 * spawn_scale))
-        eye_gap = max(2, int(self.size // 6 * spawn_scale))  # distância entre olhos
-        eye_y = render_y + int(self.size // 2 * spawn_scale) - eye_size // 2
-        center_x = render_x + int(self.size // 2 * spawn_scale)
-        left_eye_x = center_x - eye_gap // 2 - eye_size
-        right_eye_x = center_x + eye_gap // 2
-        if self.is_blinking:
-            eye_height = 0
-        else:
-            eye_height = eye_size
-        pygame.draw.rect(surface, (0, 0, 0, outline_alpha), (left_eye_x, eye_y, eye_size, eye_height))
-        pygame.draw.rect(surface, (0, 0, 0, outline_alpha), (right_eye_x, eye_y, eye_size, eye_height))
+        # --- Render eyes (aparecem só após spawn) ---
+        if not self.spawning:
+            eye_size = max(2, int(self.size // 8 * spawn_scale))
+            eye_gap = max(2, int(self.size // 6 * spawn_scale))
+            eye_y = render_y + int(self.size // 2 * spawn_scale) - eye_size // 2
+            center_x = render_x + int(self.size // 2 * spawn_scale)
+            left_eye_x = center_x - eye_gap // 2 - eye_size
+            right_eye_x = center_x + eye_gap // 2
+            if self.is_blinking:
+                eye_height = 0
+            else:
+                eye_height = eye_size
+            pygame.draw.rect(surface, (0, 0, 0, outline_alpha), (left_eye_x, eye_y, eye_size, eye_height))
+            pygame.draw.rect(surface, (0, 0, 0, outline_alpha), (right_eye_x, eye_y, eye_size, eye_height))
 
 
 class VoidWrath(Enemy):
@@ -397,7 +465,6 @@ class VoidWrath(Enemy):
         super().__init__(x, y, health=health, size=size, color=color)
         self.state = 'waiting'  # waiting, windup, fading_out, dashing, fading_in, confused
         self.timer = 0.0
-        import random
         self.wait_duration = random.uniform(0.8, 2.0)
         self.windup_duration = 0.3
         self.fade_duration = 0.5
@@ -410,7 +477,7 @@ class VoidWrath(Enemy):
         # Use Enemy's spawn animation
         self.spawning = True
         self.spawn_timer = 0.0
-        self.spawn_duration = 2.5  # seconds
+        self.spawn_duration = random.uniform(0.5, 4.0)
         self.confused_timer = 0.0
         self.confused_duration = 0.7
         self.confused_bounce = (0, 0)
@@ -418,6 +485,8 @@ class VoidWrath(Enemy):
         self.windup_halo_radius = self.size * 1.2
         self.windup_eyes_glow = False
         self.dash_trail = []  # List of (x, y, timestamp)
+
+        self.damage = 10
 
     def take_damage(self, amount, hit_direction=None):
         # Ignore damage if spawning
@@ -433,15 +502,52 @@ class VoidWrath(Enemy):
             self.vy += hit_direction[1] * knockback_strength
 
     def die(self):
-        super().die()
+        # Pixel Explosion Death Animation (igual ao Enemy, mas cor personalizada)
+        self.is_dead = True
+        self.death_timer = 0.0
+        self.death_duration = 0.5
+        self.death_flash_frames = 2
+        self.death_chunks = []
+        n_chunks = random.randint(4, 6)
+        base_color = tuple(max(0, int(c * 0.8)) for c in self.color)
+        center_x = self.x + self.size // 2
+        center_y = self.y + self.size // 2
+        for i in range(n_chunks):
+            angle = 2 * math.pi * i / n_chunks + random.uniform(-0.2, 0.2)
+            speed = random.uniform(5, 11)
+            chunk_size = self.size // 3
+            chunk_x = center_x - chunk_size // 2
+            chunk_y = center_y - chunk_size // 2
+            dx = math.cos(angle) * speed
+            dy = math.sin(angle) * speed
+            self.death_chunks.append({
+                'x': chunk_x,
+                'y': chunk_y,
+                'dx': dx,
+                'dy': dy,
+                'size': chunk_size,
+                'color': base_color,
+                'alpha': 255,
+                'timer': 0.0
+            })
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
-        # Death animation timer and removal (same as Enemy)
+        if player and hasattr(player, 'engine') and player.engine.is_paused:
+            return
+        # Death animation: pixel explosion
         if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer'):
             self.death_timer += dt
+            # Flash branco nos primeiros frames
+            if hasattr(self, 'death_flash_frames') and self.death_timer < 0.05 * self.death_flash_frames:
+                pass  # só flash, chunks não se movem
+            elif hasattr(self, 'death_chunks'):
+                for chunk in self.death_chunks:
+                    chunk['x'] += chunk['dx'] * dt * 60
+                    chunk['y'] += chunk['dy'] * dt * 60
+                    chunk['timer'] += dt
+                    chunk['alpha'] = max(0, 255 - int((chunk['timer'] / self.death_duration) * 255))
             if self.death_timer >= self.death_duration and not self.removed:
                 self.death_timer = self.death_duration
-                # Remove enemy from current room/enemy list after animation
                 room = getattr(self, 'room', None)
                 if room and hasattr(room, 'enemies') and self in room.enemies:
                     room.enemies.remove(self)
@@ -460,7 +566,6 @@ class VoidWrath(Enemy):
                 self.spawning = False
             return
         self.timer += dt
-        import random, math
         if self.state == 'waiting':
             if self.timer >= self.wait_duration and player_pos is not None:
                 self.state = 'windup'
@@ -480,7 +585,7 @@ class VoidWrath(Enemy):
             if self.timer >= self.fade_duration:
                 self.state = 'dashing'
                 self.timer = 0.0
-                # Calculate dash vector
+                # Dash: parar logo após a posição do jogador
                 px, py = self.target_pos
                 dx = px - self.x
                 dy = py - self.y
@@ -491,8 +596,12 @@ class VoidWrath(Enemy):
                 else:
                     dash_dx = dash_dy = 0
                 self.dash_start = (self.x, self.y)
-                dash_length = self.dash_speed * self.dash_duration * 60
-                dash_steps = int(dash_length)
+                # Dash vai até um ponto logo APÓS o jogador (ex: 1.2x a distância até o jogador)
+                dash_multiplier = 1.2
+                dash_target_x = self.x + dash_dx * dist * dash_multiplier
+                dash_target_y = self.y + dash_dy * dist * dash_multiplier
+                # Checa colisão com paredes no caminho
+                dash_steps = int(dist * dash_multiplier)
                 last_safe_x = self.x
                 last_safe_y = self.y
                 collision_found = False
@@ -519,7 +628,7 @@ class VoidWrath(Enemy):
                     self.dash_end = (last_safe_x, last_safe_y)
                     self._collision_on_dash = True
                 else:
-                    self.dash_end = (self.x + dash_dx * dash_length, self.y + dash_dy * dash_length)
+                    self.dash_end = (dash_target_x, dash_target_y)
                     self._collision_on_dash = False
         elif self.state == 'dashing':
             t = min(self.timer / self.dash_duration, 1.0)
@@ -532,7 +641,6 @@ class VoidWrath(Enemy):
                 self.y = self.dash_start[1] + (self.dash_end[1] - self.dash_start[1]) * ease_t
                 self.rect.topleft = (self.x, self.y)
                 # Add trail point if moved enough
-                import time, math
                 trail_dist = math.hypot(self.x - prev_x, self.y - prev_y)
                 if trail_dist > 2:
                     self.dash_trail.append((self.x, self.y, time.time()))
@@ -541,10 +649,9 @@ class VoidWrath(Enemy):
                 player_rect = pygame.Rect(player.x, player.y, player.size, player.size)
                 if self.rect.colliderect(player_rect):
                     if hasattr(player, 'take_damage'):
-                        player.take_damage(1)
+                        player.take_damage(self.damage)
             self.alpha = 50  # visible while dashing
             if self.timer >= self.dash_duration:
-                import random
                 self.wait_duration = random.uniform(0.8, 2.0)
                 if getattr(self, '_collision_on_dash', False):
                     self.state = 'confused'
@@ -577,6 +684,8 @@ class VoidWrath(Enemy):
             if self.confused_timer >= self.confused_duration:
                 self.state = 'fading_in'
                 self.timer = 0.0
+                # Aumenta o cooldown do dash em 2 segundos após ficar tonto
+                self.wait_duration += 2.0
         elif self.state == 'fading_in':
             t = min(self.timer / self.fade_duration, 1.0)
             self.alpha = int(255 * t)
@@ -594,8 +703,41 @@ class VoidWrath(Enemy):
     def draw(self, surface, camera_x=0, camera_y=0, zoom=1.0):
         if getattr(self, 'removed', False):
             return
+        # Death animation: pixel explosion
+        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer') and hasattr(self, 'death_chunks'):
+            if self.death_timer < 0.05 * getattr(self, 'death_flash_frames', 2):
+                render_x = self.x - camera_x
+                render_y = self.y - camera_y
+                enemy_rect = pygame.Rect(render_x, render_y, self.size, self.size)
+                pygame.draw.rect(surface, (255, 255, 255, 255), enemy_rect, border_radius=6)
+            else:
+                for chunk in self.death_chunks:
+                    chunk_surf = pygame.Surface((chunk['size'], chunk['size']), pygame.SRCALPHA)
+                    pygame.draw.rect(chunk_surf, (*chunk['color'], chunk['alpha']), (0, 0, chunk['size'], chunk['size']))
+                    draw_x = int(chunk['x'] - camera_x)
+                    draw_y = int(chunk['y'] - camera_y)
+                    surface.blit(chunk_surf, (draw_x, draw_y))
+            # Render floating damage numbers mesmo durante a morte
+            font = pygame.font.SysFont('arial', 18, bold=True)
+            damage_lifetime = 0.7
+            damage_rise = 30
+            now = time.time()
+            for dmg in self.floating_damage[:]:
+                elapsed = now - dmg['timestamp']
+                if elapsed > damage_lifetime:
+                    self.floating_damage.remove(dmg)
+                    continue
+                alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
+                offset = int((elapsed / damage_lifetime) * damage_rise)
+                dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+                dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
+                dmg_surf.blit(dmg_text, (0, 0))
+                dmg_surf.set_alpha(alpha)
+                draw_x = int(dmg['x'] - camera_x - dmg_text.get_width() // 2)
+                draw_y = int(dmg['y'] - camera_y - 20 - offset)
+                surface.blit(dmg_surf, (draw_x, draw_y))
+            return
         # --- Render dash trail (dark) ---
-        import time
         trail_lifetime = 0.4
         trail_color = (30, 0, 40)
         trail_radius = max(4, self.size // 4)
@@ -605,11 +747,11 @@ class VoidWrath(Enemy):
             alpha = max(0, 120 - int((now - tstamp) / trail_lifetime * 120))
             trail_surf = pygame.Surface((trail_radius*2, trail_radius*2), pygame.SRCALPHA)
             pygame.draw.ellipse(trail_surf, (*trail_color, alpha), (0, 0, trail_radius*2, trail_radius*2))
-            surface.blit(trail_surf, (int(tx - trail_radius - camera_x), int(ty - trail_radius - camera_y)))
+            surface.blit(trail_surf, (int(tx - trail_radius - camera_x), int(ty - trail_radius - camera_y)) )
         # --- Render floating damage numbers ---
         font = pygame.font.SysFont('arial', 18, bold=True)
-        damage_lifetime = 0.7  # seconds
-        damage_rise = 30  # pixels
+        damage_lifetime = 0.7
+        damage_rise = 30
         now = time.time()
         for dmg in self.floating_damage[:]:
             elapsed = now - dmg['timestamp']
@@ -625,22 +767,14 @@ class VoidWrath(Enemy):
             draw_x = int(dmg['x'] - camera_x - dmg_text.get_width() // 2)
             draw_y = int(dmg['y'] - camera_y - 20 - offset)
             surface.blit(dmg_surf, (draw_x, draw_y))
-
         # --- Spawning and death animation: scale up/down ---
         spawn_scale = 1.0
-        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer'):
-            # Death animation: shrink and fade out (ease-in cubic)
-            t = min(self.death_timer / self.death_duration, 1.0)
-            spawn_scale = 0.2 + 0.8 * pow(1-t, 3)
-            death_alpha = int(255 * pow(1-t, 3))
-        elif self.spawning:
+        if self.spawning:
             t = min(self.spawn_timer / self.spawn_duration, 1.0)
-            # Ease-out cubic for smooth pop-in
             spawn_scale = 0.2 + 0.8 * (1 - pow(1-t, 3))
             death_alpha = 255
         else:
             death_alpha = 255
-
         # --- Render enemy body with scale and fade ---
         render_x = self.x - camera_x
         render_y = self.y - camera_y
@@ -655,38 +789,33 @@ class VoidWrath(Enemy):
         outline_alpha = death_alpha
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, border_radius=6)
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, width=4, border_radius=6)
-        # Body
         if getattr(self, 'flash_timer', 0.0) > 0.0:
             pygame.draw.rect(surface, (255, 255, 255, outline_alpha), enemy_rect.inflate(-6, -6), border_radius=6)
         else:
             pygame.draw.rect(surface, (*self.color, outline_alpha), enemy_rect.inflate(-6, -6), border_radius=6)
-
         # --- Windup visual cue: eyes glow red + shrinking halo ---
         if self.state == 'windup':
-            # Shrinking halo with easing
             t = min(self.timer / self.windup_duration, 1.0)
-            ease_t = 1 - pow(1 - t, 3)  # ease-out cubic
+            ease_t = 1 - pow(1 - t, 3)
             halo_radius = int(self.size * (1.2 - 0.7 * ease_t))
             halo_surf = pygame.Surface((halo_radius*2, halo_radius*2), pygame.SRCALPHA)
-            # Telegraphy circle: half alpha white
             pygame.draw.ellipse(halo_surf, (255, 255, 255, 128), (0, 0, halo_radius*2, halo_radius*2), width=6)
             halo_x = int(render_x + self.size/2 - halo_radius)
             halo_y = int(render_y + self.size/2 - halo_radius)
             surface.blit(halo_surf, (halo_x, halo_y))
-
-        # --- Render eyes (fade with alpha, glow red if windup) ---
-        eye_size = max(2, int(self.size // 8 * spawn_scale))
-        eye_gap = max(2, int(self.size // 6 * spawn_scale))
-        eye_y = render_y + int(self.size // 2 * spawn_scale) - eye_size // 2
-        center_x = render_x + int(self.size // 2 * spawn_scale)
-        left_eye_x = center_x - eye_gap // 2 - eye_size
-        right_eye_x = center_x + eye_gap // 2
-        if self.state == 'windup' and self.windup_eyes_glow:
-            # Eyes glow red
-            glow_color = (255, 0, 0, 220)
-            pygame.draw.rect(surface, glow_color, (left_eye_x, eye_y, eye_size, eye_size))
-            pygame.draw.rect(surface, glow_color, (right_eye_x, eye_y, eye_size, eye_size))
-        else:
-            eye_color = (0, 0, 0, outline_alpha)
-            pygame.draw.rect(surface, eye_color, (left_eye_x, eye_y, eye_size, eye_size))
-            pygame.draw.rect(surface, eye_color, (right_eye_x, eye_y, eye_size, eye_size))
+        # --- Render eyes (aparecem só após spawn) ---
+        if not self.spawning:
+            eye_size = max(2, int(self.size // 8 * spawn_scale))
+            eye_gap = max(2, int(self.size // 6 * spawn_scale))
+            eye_y = render_y + int(self.size // 2 * spawn_scale) - eye_size // 2
+            center_x = render_x + int(self.size // 2 * spawn_scale)
+            left_eye_x = center_x - eye_gap // 2 - eye_size
+            right_eye_x = center_x + eye_gap // 2
+            if self.state == 'windup' and self.windup_eyes_glow:
+                glow_color = (255, 0, 0, 220)
+                pygame.draw.rect(surface, glow_color, (left_eye_x, eye_y, eye_size, eye_size))
+                pygame.draw.rect(surface, glow_color, (right_eye_x, eye_y, eye_size, eye_size))
+            else:
+                eye_color = (0, 0, 0, outline_alpha)
+                pygame.draw.rect(surface, eye_color, (left_eye_x, eye_y, eye_size, eye_size))
+                pygame.draw.rect(surface, eye_color, (right_eye_x, eye_y, eye_size, eye_size))
