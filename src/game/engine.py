@@ -8,8 +8,96 @@ from game.player import Player
 from game.dungeon import Dungeon
 from game.util.light import render_volumetric_light
 from game.util.ui import Button
+from game.assets import get_font
 
 class GameEngine:
+    def run_game_over_screen(self):
+        """Show a game over overlay and wait for player to restart the floor or quit."""
+        overlay_alpha = 160
+        animation_time = 0.0
+        animation_duration = 1.2  # seconds for fade-in
+        running_game_over = True
+        button_restart = Button("Restart Floor", (self.width//2 - 150, self.height//2 + 40, 300, 60), action=None)
+        button_quit = Button("Quit", (self.width//2 - 150, self.height//2 + 120, 300, 60), action=None)
+        buttons = [button_restart, button_quit]
+        selected_index = 0
+        self.game_over_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 64)
+        text_surf = self.game_over_font.render("GAME OVER", True, (255, 60, 60))
+        text_rect = text_surf.get_rect(center=(self.width//2, self.height//2 - 80))
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, overlay_alpha))
+        mouse_active = False
+        pygame.mouse.set_visible(False)
+
+        def restart():
+            nonlocal running_game_over
+            running_game_over = False
+
+        def quit_game():
+            nonlocal running_game_over
+            self.running = False
+            running_game_over = False
+
+        button_restart.action = restart
+        button_quit.action = quit_game
+
+        while running_game_over and self.running:
+            self.dt = self.clock.get_time() / 1000.0
+            self.update_crosshair(self.dt)
+            self.update_crosshair_particles(self.dt)
+            mouse_pos = pygame.mouse.get_pos()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    running_game_over = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        buttons[selected_index].action()
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_index = (selected_index + 1) % len(buttons)
+                        mouse_active = False
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        selected_index = (selected_index - 1) % len(buttons)
+                        mouse_active = False
+                elif event.type == pygame.MOUSEMOTION:
+                    for i, button in enumerate(buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            selected_index = i
+                            mouse_active = True
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, button in enumerate(buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            selected_index = i
+                            button.action()
+
+            # Fade-in animation
+            if animation_time < animation_duration:
+                animation_time += self.dt
+                fade = min(1.0, animation_time / animation_duration)
+            else:
+                fade = 1.0
+
+            # Draw last frame as background (optional: could use a snapshot)
+            self.render(do_flip=False)
+            # Overlay
+            overlay.set_alpha(int(overlay_alpha * fade))
+            self.screen.blit(overlay, (0, 0))
+            # Game Over text
+            text_surf.set_alpha(int(255 * fade))
+            self.screen.blit(text_surf, text_rect)
+            # Draw buttons
+            for i, button in enumerate(buttons):
+                is_selected = (i == selected_index)
+                button.draw(self.screen, mouse_pos, selected=is_selected)
+            # Crosshair
+            crosshair_img = self.current_crosshair if hasattr(self, 'current_crosshair') else None
+            crosshair_offset = self.crosshair_offset if hasattr(self, 'crosshair_offset') else (0, 0)
+            if crosshair_img:
+                self.screen.blit(crosshair_img, (mouse_pos[0] - crosshair_offset[0], mouse_pos[1] - crosshair_offset[1]))
+            pygame.display.flip()
+
+        # After leaving, reset mouse visibility
+        pygame.mouse.set_visible(True)
     # Track previous room index for rendering
     def __init__(self, screen, width=800, height=600, title="Dungeon Crawler", fullscreen=True):
         self.mouse_attack_held = False  # Track if mouse attack button is held
@@ -722,6 +810,20 @@ class GameEngine:
 
         # Atualizações do jogador
         self.player.update(rooms=adjacent_rooms, dt=dt, enemies=self.enemies)
+
+        # --- PLAYER DEATH CHECK ---
+        if self.player.health <= 0:
+            self.run_game_over_screen()
+            if not self.running:
+                return
+            # Restart floor and restore player stats
+            self.reset_to_first_room()
+            self.player.health = self.player.max_health
+            self.player.display_health = self.player.max_health
+            self.player.stamina = self.player.max_stamina
+            self.player.display_stamina = self.player.max_stamina
+            self.projectiles.clear()
+            return
         
         # Atualiza inimigos com dt explícito
         for enemy in self.enemies:
@@ -1122,8 +1224,6 @@ class GameEngine:
                 if t >= 1.0:
                     phase = "bounce"
                     phase_start = now
-                    bounce_start = now
-                    self._start_camera_shake(0.4, 7)
 
             elif phase == "bounce":
                 bt = (now - bounce_start) / landing_bounce_duration if bounce_start else 1.0
@@ -1169,7 +1269,7 @@ class GameEngine:
                     overlay_start = now
 
             elif phase == "overlay_fade_out":
-                # fade overlay_alpha from 255 -> 0
+                # Start music crossfade when overlay fade begins
                 t = min(1.0, (now - overlay_start) / overlay_fade_duration)
                 overlay_alpha = int(255 * (1.0 - t))
                 # keep UI visible underneath
@@ -1248,6 +1348,9 @@ class GameEngine:
         pygame.display.flip()
         pygame.event.pump()
         self.in_cutscene = False
+        # Reset music blend flag for next cutscene
+        if hasattr(self, '_music_blend_started'):
+            del self._music_blend_started
 
 
 

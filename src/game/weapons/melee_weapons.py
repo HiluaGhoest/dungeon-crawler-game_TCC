@@ -2,9 +2,15 @@ import pygame
 import math
 import time
 import random
+import numpy as np
+import sys
 from game.weapons.weapon import Weapon
+from game.assets import load_audio
 
 class MeleeWeapon(Weapon):
+    _woosh_sound = None
+    _woosh_array = None
+    _woosh_rate = None
     def can_deal_damage(self):
         """Returns True if weapon is in the damage-dealing phase (phase 3)."""
         return self.swing_phase == 3
@@ -22,12 +28,66 @@ class MeleeWeapon(Weapon):
     def can_attack(self):
         return (time.time() - self.last_attack_time) >= getattr(self, 'swing_cooldown', 1.0)
 
+    def _play_woosh(self, phase):
+        # phase: 1=high/fast, 2=slow/bassy, 3=fast/bassy
+        if MeleeWeapon._woosh_sound is None:
+            MeleeWeapon._woosh_sound = load_audio("game/sounds/effects/sword_woosh.wav")
+        # Ensure _woosh_array is loaded
+        if MeleeWeapon._woosh_array is None and MeleeWeapon._woosh_sound is not None:
+            try:
+                arr = pygame.sndarray.array(MeleeWeapon._woosh_sound)
+                if arr.dtype != np.int16:
+                    arr = arr.astype(np.int16)
+                MeleeWeapon._woosh_array = arr
+                MeleeWeapon._woosh_rate = pygame.mixer.get_init()[0]
+                print(f"[DEBUG] Woosh array shape: {arr.shape}, dtype: {arr.dtype}", file=sys.stderr)
+            except Exception as e:
+                print(f"[DEBUG] Failed to get woosh array: {e}", file=sys.stderr)
+                return
+        arr = MeleeWeapon._woosh_array
+        if arr is None:
+            print(f"[DEBUG] Woosh array is still None!", file=sys.stderr)
+            return
+        # Add more randomization to speed and volume
+        if phase == 1:
+            speed = random.uniform(1.2, 1.5)  # high/fast
+            volume = random.uniform(0.3, 0.5)
+        elif phase == 2:
+            speed = random.uniform(0.6, 0.85)  # slow/bassy
+            volume = random.uniform(0.3, 10.5)
+        else:
+            speed = random.uniform(1.1, 1.35)  # fast/bassy
+            volume = random.uniform(0.2, 0.5)
+        # Resample array for mono or stereo
+        try:
+            if arr.ndim == 1:
+                idxs = np.round(np.arange(0, len(arr), 1/speed)).astype(int)
+                idxs = idxs[idxs < len(arr)]
+                arr2 = arr[idxs]
+            elif arr.ndim == 2:
+                idxs = np.round(np.arange(0, arr.shape[0], 1/speed)).astype(int)
+                idxs = idxs[idxs < arr.shape[0]]
+                arr2 = arr[idxs, :]
+            else:
+                print(f"[DEBUG] Unexpected array ndim: {arr.ndim}", file=sys.stderr)
+                return
+            # Ensure C-contiguous and int16
+            arr2 = np.ascontiguousarray(arr2, dtype=np.int16)
+            print(f"[DEBUG] Resampled woosh array shape: {arr2.shape}, dtype: {arr2.dtype}, contiguous: {arr2.flags['C_CONTIGUOUS']}", file=sys.stderr)
+            sound = pygame.sndarray.make_sound(arr2)
+            sound.set_volume(volume)
+            print(f"[DEBUG] Playing woosh sound! speed={speed:.2f} volume={volume:.2f}", file=sys.stderr)
+            sound.play()
+        except Exception as e:
+            print(f"[DEBUG] Woosh sound play failed: {e}", file=sys.stderr)
+
     def attack(self, player_center, angle):
         if not self.can_attack():
             return False
         self.last_attack_time = time.time()
         self.swing_start_time = time.time()
         self.swing_phase = 1  # start swing forward
+        self._play_woosh(1)
         print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
         return True
 
@@ -39,9 +99,11 @@ class MeleeWeapon(Weapon):
                 if self.swing_phase == 1:
                     self.swing_phase = 2  # backward
                     self.swing_start_time = time.time()
+                    self._play_woosh(2)
                 elif self.swing_phase == 2:
                     self.swing_phase = 3
                     self.swing_start_time = time.time()
+                    self._play_woosh(3)
                 else:
                     self.swing_phase = 0  # finished
 
@@ -167,8 +229,10 @@ class SteelSword(MeleeWeapon):
         self.swing_start_time = time.time()
         self.swing_phase = 1  # start swing forward
         self.swing_angle = angle  # salva o ângulo do swing
+        self._play_woosh(1)
         print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
         return True
+
 
     def update(self, dt):
         # Always update animation regardless of swinging state
@@ -187,11 +251,13 @@ class SteelSword(MeleeWeapon):
                 if elapsed > self.swing_duration + phase1_hold_time:
                     self.swing_phase = 2  # backward
                     self.swing_start_time = time.time()
+                    self._play_woosh(2)
 
             elif self.swing_phase == 2:
                 if elapsed > self.swing_duration:
                     self.swing_phase = 3  # return
                     self.swing_start_time = time.time()
+                    self._play_woosh(3)
 
             else:
                 if elapsed > self.swing_duration:

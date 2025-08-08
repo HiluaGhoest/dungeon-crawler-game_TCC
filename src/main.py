@@ -4,7 +4,8 @@ import pygame
 import sys
 import cProfile
 from game.engine import GameEngine
-from game.util.ui import BTN_COLOR, FONT, HOVER_COLOR, MIXER, TEXT_COLOR, Button, blur_surface
+from game.util.ui import BTN_COLOR, FONT, HOVER_COLOR, TEXT_COLOR, Button, blur_surface
+from game.assets import load_audio
 
 # --- Loading Screen ---
 def show_loading_screen():
@@ -31,11 +32,12 @@ clock = pygame.time.Clock()
 BG_COLOR = (10, 10, 10)
 
 # Sound effects
-start_game = MIXER.Sound("game/sounds/effects/start_game.mp3")
-# Load background music
-MUSIC_PATH = "game/sounds/music/Echoes_of_the_Abyss.mp3"
-MIXER.music.load(MUSIC_PATH)
-MIXER.music.set_volume(0.01)  # Low volume
+start_game = load_audio("game/sounds/effects/start_game.mp3")
+
+# Load menu/intro music
+MENU_MUSIC_PATH = "game/sounds/music/Open Skies - Infinite Orbit - Sonauto.mp3"
+pygame.mixer.music.load(MENU_MUSIC_PATH)
+pygame.mixer.music.set_volume(0.2)  # Adjust as needed
 
 class Star:
     def __init__(self):
@@ -63,12 +65,10 @@ stars = [Star() for _ in range(100)]
 def start_singleplayer():
     start_game.play()
     fade_out()
-    # Start background music (looping)
-    pygame.mixer.music.play(-1)
+    # Do NOT restart music here; let menu/intro music continue
     game = GameEngine(screen)
     game.run()
-    # Optionally stop music after game ends
-    pygame.mixer.music.stop()
+    # Do not stop music here; let menu or next game handle music state
 
 def open_settings():
     run_settings_menu()
@@ -345,11 +345,13 @@ def run_menu():
     crosshair_offset = (size[0] // 2, size[1] // 2)
     pygame.mouse.set_visible(False)
 
+    # Always reload and play menu music when entering menu
+    pygame.mixer.music.load(MENU_MUSIC_PATH)
+    pygame.mixer.music.set_volume(settings.get("music_volume", 0.2))
+    pygame.mixer.music.play(-1)
     while True:
         frame_count += 1
         dt = clock.get_time() / 1000.0
-        if frame_count == 1 and not MIXER.music.get_busy():
-            MIXER.music.play(-1)
         screen.fill(BG_COLOR)
         mouse_pos = pygame.mouse.get_pos()
 

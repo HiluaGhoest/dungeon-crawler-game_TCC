@@ -2,8 +2,12 @@ import random
 import pygame
 import math
 import time
+from . import assets
 
 class Enemy:
+    # Preload death sound as a class variable
+    death_sound = assets.load_audio('game/sounds/effects/slime_death.wav')
+
     def __init__(self, x, y, health=10, size=24, color=(255, 0, 60)):
         self.x = x
         self.y = y
@@ -89,6 +93,9 @@ class Enemy:
             self.die()
 
     def die(self):
+        # Play death sound effect
+        if Enemy.death_sound:
+            Enemy.death_sound.play()
         # Pixel Explosion Death Animation
         self.is_dead = True
         self.death_timer = 0.0
@@ -488,6 +495,12 @@ class VoidWrath(Enemy):
 
         self.damage = 10
 
+        # Preload dizzy sound effect
+        self.dizzy_sound = assets.load_audio('game/sounds/effects/void_wrath_dizzing.wav')
+        # Preload telegraphy sound effect
+        self.telegraphy_sound = assets.load_audio('game/sounds/effects/telegraphy_void_wrath.wav')
+        self.telegraphy_sound.set_volume(0.3)  # Set volume to 50%
+
     def take_damage(self, amount, hit_direction=None):
         # Ignore damage if spawning
         if getattr(self, 'spawning', False):
@@ -502,34 +515,8 @@ class VoidWrath(Enemy):
             self.vy += hit_direction[1] * knockback_strength
 
     def die(self):
-        # Pixel Explosion Death Animation (igual ao Enemy, mas cor personalizada)
-        self.is_dead = True
-        self.death_timer = 0.0
-        self.death_duration = 0.5
-        self.death_flash_frames = 2
-        self.death_chunks = []
-        n_chunks = random.randint(4, 6)
-        base_color = tuple(max(0, int(c * 0.8)) for c in self.color)
-        center_x = self.x + self.size // 2
-        center_y = self.y + self.size // 2
-        for i in range(n_chunks):
-            angle = 2 * math.pi * i / n_chunks + random.uniform(-0.2, 0.2)
-            speed = random.uniform(5, 11)
-            chunk_size = self.size // 3
-            chunk_x = center_x - chunk_size // 2
-            chunk_y = center_y - chunk_size // 2
-            dx = math.cos(angle) * speed
-            dy = math.sin(angle) * speed
-            self.death_chunks.append({
-                'x': chunk_x,
-                'y': chunk_y,
-                'dx': dx,
-                'dy': dy,
-                'size': chunk_size,
-                'color': base_color,
-                'alpha': 255,
-                'timer': 0.0
-            })
+        # Use Enemy's die method to play sound and handle animation
+        super().die()
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
         if player and hasattr(player, 'engine') and player.engine.is_paused:
@@ -571,6 +558,9 @@ class VoidWrath(Enemy):
                 self.state = 'windup'
                 self.timer = 0.0
                 self.target_pos = player_pos
+                # Play telegraphy sound effect when telegraphy indicator appears
+                if self.telegraphy_sound:
+                    self.telegraphy_sound.play()
         elif self.state == 'windup':
             t = min(self.timer / self.windup_duration, 1.0)
             self.windup_eyes_glow = True
@@ -656,6 +646,9 @@ class VoidWrath(Enemy):
                 if getattr(self, '_collision_on_dash', False):
                     self.state = 'confused'
                     self.confused_timer = 0.0
+                    # Play dizzy sound effect
+                    if self.dizzy_sound:
+                        self.dizzy_sound.play()
                 else:
                     self.state = 'fading_in'
                 self.timer = 0.0

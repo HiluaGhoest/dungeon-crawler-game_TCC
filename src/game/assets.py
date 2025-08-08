@@ -52,3 +52,34 @@ def get_font(path, size):
     if key not in _font_cache:
         _font_cache[key] = load_font(path, size)
     return _font_cache[key]
+
+# Audio loading functions
+def load_audio(path, music=False):
+    """
+    Loads an audio file. If music=True, loads for pygame.mixer.music (streamed music),
+    otherwise loads as a Sound effect.
+    """
+    # Ensure mixer is initialized with standard settings
+    if not pygame.mixer.get_init():
+        try:
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            print("[ASSET] Mixer initialized with 44100Hz, 16bit, 2ch, 512 buffer")
+        except Exception as e:
+            print(f"[ASSET] Mixer init failed: {e}")
+            return None
+    full_path = os.path.join(os.path.dirname(__file__), '..', path)
+    if not os.path.exists(full_path):
+        print(f"[ASSET] Audio not found: {full_path}")
+        return None
+    try:
+        if music:
+            print(f"[ASSET] Loaded music: {full_path}")
+            return full_path  # For music, return path to be loaded with pygame.mixer.music.load
+        else:
+            sound = pygame.mixer.Sound(full_path)
+            sound.set_volume(1.0)
+            print(f"[ASSET] Loaded sound: {full_path}")
+            return sound
+    except Exception as e:
+        print(f"[ASSET] Failed to load audio: {full_path} ({e})")
+        return None

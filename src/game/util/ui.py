@@ -1,10 +1,13 @@
+
 import pygame
-from game.assets import get_image, get_font
+from game.assets import get_image, get_font, load_audio
 
-pygame.mixer.init()
-MIXER = pygame.mixer
 
-hover_sound = pygame.mixer.Sound("game/sounds/effects/button_hover.mp3")
+# Initialize mixer if not already initialized
+if not pygame.mixer.get_init():
+    pygame.mixer.init()
+
+hover_sound = load_audio("game/sounds/effects/button_hover.wav")
 
 BTN_COLOR = (40, 40, 40)
 HOVER_COLOR = (80, 80, 80)
@@ -22,6 +25,7 @@ def blur_surface(surface, iterations=3):
 def ease_out_cubic(t):
     return 1 - pow(1 - t, 3)
 
+
 class Button:
     def __init__(self, text, rect, action):
         self.text = text
@@ -30,8 +34,18 @@ class Button:
         self.hover_progress = 0  # from 0 to 1 for smooth scaling
         # Load button sprite after display is initialized
         self.button_sprite = get_image("button", "game/assets/sprites/ui/button.png")
+        self._was_selected = False  # Track previous selected state for sound
+
 
     def draw(self, surface, mouse_pos, selected=False):
+        # Play hover/select sound when selected changes from False to True
+        if selected and not self._was_selected and hover_sound:
+            try:
+                hover_sound.play()
+            except Exception:
+                pass
+        self._was_selected = selected
+
         # Animate hover progress
         target = 1 if selected else 0
         self.hover_progress += (target - self.hover_progress) * 0.1

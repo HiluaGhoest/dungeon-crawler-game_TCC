@@ -8,10 +8,12 @@ from game.weapons.weapon import Weapon
 from game.weapons.melee_weapons import MeleeWeapon
 from game.weapons.ranged_weapons import RangedWeapon
 from game.util.ui import ease_out_cubic
-from game.assets import get_image
+from game.assets import get_image, load_audio
 
 
 class Player:
+    _pickup_sound = load_audio('game/sounds/effects/pick_up_weapon.wav')
+    _swap_weapon_sound = load_audio('game/sounds/effects/change_weapons.wav')
     def __init__(self, x, y, speed=5, color=(255, 255, 255), size=16, sprite_path=None):
         self.x = x
         self.y = y
@@ -318,6 +320,7 @@ class Player:
         self.weapons[self.active_weapon_index] = value
 
     def try_pickup_weapon(self):
+    # Pickup sound is preloaded at class level
         # Find the first empty slot
         empty_slot = None
         for i, w in enumerate(self.weapons):
@@ -335,6 +338,12 @@ class Player:
             if dist < pickup_radius:
                 self.weapons[empty_slot] = weapon
                 del self.dropped_weapons[idx]
+                # Play pickup sound
+                if Player._pickup_sound:
+                    try:
+                        Player._pickup_sound.play()
+                    except Exception:
+                        pass
                 return True
         return False
 
@@ -347,12 +356,17 @@ class Player:
         new_x, new_y = self.x, self.y
 
         # Weapon switching (1, 2, 3)
+        prev_weapon_index = self.active_weapon_index
         if keys[pygame.K_1]:
             self.active_weapon_index = 0
         elif keys[pygame.K_2]:
             self.active_weapon_index = 1
         elif keys[pygame.K_3]:
             self.active_weapon_index = 2
+        # Play swap sound if weapon changed
+        if self.active_weapon_index != prev_weapon_index:
+            if Player._swap_weapon_sound:
+                Player._swap_weapon_sound.play()
 
         # Drop weapon (Q)
         if keys[pygame.K_q]:
@@ -771,7 +785,16 @@ class Player:
             self.is_blinking = False
             self.blink_timer = 0.0
 
+    # Death animation support: fade out and shrink
     def render(self, surface, camera_x=0, camera_y=0, rooms=None, zoom=1.0, show_collision_rects=False, dt=0.016):
+        # Death animation: fade out and shrink
+        death_t = getattr(self, '_death_anim_progress', None)
+        fade_alpha = 255
+        shrink_scale = 1.0
+        if death_t is not None:
+            fade_alpha = int(255 * (1.0 - death_t))
+            shrink_scale = max(0.2, 1.0 - 0.7 * death_t)
+
         from game.util.light import create_soft_player_light
         # Calculate render position with camera offset
         render_x = self.x - camera_x
@@ -812,12 +835,12 @@ class Player:
         )
 
         # --- Render player shadow ---
-        shadow_width = int(self.size * 0.9)
-        shadow_height = int(self.size * 0.4)
-        shadow_x = render_x + (self.size - shadow_width) // 2
-        shadow_y = render_y + self.size - shadow_height // 2
+        shadow_width = int(self.size * 0.9 * shrink_scale)
+        shadow_height = int(self.size * 0.4 * shrink_scale)
+        shadow_x = render_x + (self.size * shrink_scale - shadow_width) // 2
+        shadow_y = render_y + self.size * shrink_scale - shadow_height // 2
         shadow_surf = pygame.Surface((shadow_width, shadow_height), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow_surf, (0, 0, 0, 80), (0, 0, shadow_width, shadow_height))
+        pygame.draw.ellipse(shadow_surf, (0, 0, 0, int(80 * (fade_alpha / 255))), (0, 0, shadow_width, shadow_height))
         surface.blit(shadow_surf, (shadow_x, shadow_y))
 
         # --- Render footprints ---
@@ -895,32 +918,34 @@ class Player:
         # --- bob timer já atualizado no update(dt), aqui só calcula o offset ---
         eye_bob_offset = (self.eye_bob_amplitude + 3) * math.sin(self.eye_bob_timer * 2 * math.pi * (self.eye_bob_speed + 0.5))
 
-        # Corpo: encolhe a altura baseado no bob
-        new_height = int(self.size - abs(eye_bob_offset) * 0.5)
-        new_width = int(self.size + abs(eye_bob_offset) * 0.5 * 2)
+        # Corpo: encolhe a altura baseado no bob e na animação de morte
+        new_height = int(self.size * shrink_scale - abs(eye_bob_offset) * 0.5 * shrink_scale)
+        new_width = int(self.size * shrink_scale + abs(eye_bob_offset) * 0.5 * 2 * shrink_scale)
 
-        base_y = render_y + self.size
+        base_y = render_y + self.size * shrink_scale
         new_y = base_y - new_height
 
-        base_x = render_x + self.size / 2
+        base_x = render_x + self.size * shrink_scale / 2
         new_x = base_x - new_width / 2
 
         player_rect = pygame.Rect(new_x, new_y, new_width, new_height)
-        pygame.draw.rect(surface, self.color, player_rect)
+        player_surf = pygame.Surface((new_width, new_height), pygame.SRCALPHA)
+        player_surf.fill((*self.color, fade_alpha))
+        surface.blit(player_surf, player_rect)
 
         # Olhos
         eye_size = 2
-
-        eye_y_base = render_y + 5
-        eye_y = eye_y_base  # olhos sobem e descem suavemente
-
-        left_eye_x = render_x + 5 + eye_shift
-        right_eye_x = render_x + self.size - 5 - eye_size + eye_shift
-
+        eye_y_base = render_y + 5 * shrink_scale
+        eye_y = eye_y_base
+        left_eye_x = render_x + 5 * shrink_scale + eye_shift
+        right_eye_x = render_x + self.size * shrink_scale - 5 * shrink_scale - eye_size + eye_shift
         if self.is_blinking:
             eye_height = 0
         else:
-            eye_height = 2
-
-        pygame.draw.rect(surface, (0, 0, 0), (left_eye_x, eye_y, eye_size, eye_height))
-        pygame.draw.rect(surface, (0, 0, 0), (right_eye_x, eye_y, eye_size, eye_height))
+            eye_height = int(2 * shrink_scale)
+        eye_alpha = fade_alpha
+        eye_color = (0, 0, 0, eye_alpha)
+        eye_surf = pygame.Surface((eye_size, eye_height), pygame.SRCALPHA)
+        eye_surf.fill(eye_color)
+        surface.blit(eye_surf, (left_eye_x, eye_y))
+        surface.blit(eye_surf, (right_eye_x, eye_y))
