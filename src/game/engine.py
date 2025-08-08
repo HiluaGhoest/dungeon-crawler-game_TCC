@@ -111,7 +111,7 @@ class GameEngine:
         # For smooth transitions
         self.crosshair_scale = 1.0
         self.target_scale = 1.0
-
+        
     def update_crosshair(self, dt):
         """Smoothly transition between crosshair states"""
         if self.mouse_attack_held:
@@ -428,6 +428,10 @@ class GameEngine:
                     self.show_fps = not self.show_fps
                 elif event.key == pygame.K_F4:
                     self.show_collision_rects = not self.show_collision_rects
+                elif event.key == pygame.K_SPACE:
+                    # Advance tutorial if active
+                    if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
+                        self.tutorial_step += 1
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 self.mouse_attack_held = True
@@ -439,12 +443,16 @@ class GameEngine:
         current_index = self.dungeon.current_room_index
         adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
 
+        # Always update self.enemies to current room's enemies
+        current_room = self.dungeon.get_current_room()
+        self.enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
+
         # move player
         self.player.update(rooms=adjacent_rooms)
 
         # update room based on player position (bounding box detection)
         if self.mouse_attack_held:
-            if self.player.attack(self.camera_x, self.camera_y, self.zoom):
+            if self.player.attack(self.camera_x, self.camera_y, self.zoom, self.projectiles, self.enemies):
                 print("Ataque executado!")
         prev_room_index = self.dungeon.current_room_index
         self.dungeon.update_player_room(self.player.rect)
@@ -457,6 +465,7 @@ class GameEngine:
             for o in self.dungeon.opening_positions:
                 print("   ", o)
             self.room = self.dungeon.get_current_room()
+            self.enemies = getattr(self.room, 'enemies', []) if hasattr(self.room, 'enemies') else []
 
         # update camera to follow player
         self._update_camera()
@@ -471,21 +480,19 @@ class GameEngine:
                 self.zoom,
                 self.projectiles
             )
-            
-        current_room = self.dungeon.get_current_room()
 
-        enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
         # Get wall rects for the current room
         wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
         # Get room boundary as a pygame.Rect
         room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
         for proj in self.projectiles[:]:
-            proj.update(self.dt, enemies, wall_rects, room_rect)
+            proj.update(self.dt, self.enemies, wall_rects, room_rect)
             if not getattr(proj, 'is_alive', True):
                 self.projectiles.remove(proj)
         # --- UPDATE ENEMIES ---
-        for enemy in enemies:
-            enemy.update(self.dt, player_pos=(self.player.x, self.player.y))
+        for enemy in self.enemies:
+            enemy.engine = self  # Ensure each enemy can access engine context
+            enemy.update(self.dt, player_pos=(self.player.x, self.player.y), other_enemies=self.enemies, player=self.player)
 
     def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
         """Enhanced lighting with raycasting and performance optimizations"""
@@ -572,19 +579,16 @@ class GameEngine:
         darkness_overlay = pygame.Surface((virtual_width, virtual_height), pygame.SRCALPHA)
         darkness_overlay.fill((0, 0, 0, 255))  # Fully opaque black
 
-            # Cut light holes for ALL light sources
         for light in self.light_sources:
-            # Convert to screen coordinates
             light_x = light['pos'][0] - self.camera_x
             light_y = light['pos'][1] - self.camera_y
-            
             self.cut_radial_light(
                 darkness_overlay,
                 (light_x, light_y),
                 light['radius'],
                 light['intensity']
             )
-            
+
         floor_screen_rect = pygame.Rect(
             current_room.x - self.camera_x,
             current_room.y - self.camera_y,
@@ -592,7 +596,6 @@ class GameEngine:
             current_room.height
         )
 
-        
         wall_rects = []
         for wall in current_room.get_wall_rects():
             screen_wall = pygame.Rect(
@@ -603,44 +606,34 @@ class GameEngine:
             )
             wall_rects.append(screen_wall)
 
-        # Fill the union of all wall rects as a single region
         if wall_rects:
             union_rect = wall_rects[0].unionall(wall_rects[1:])
             darkness_overlay.fill((0, 0, 0, 0), union_rect)
-        
+
         player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
         player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
         player_center = (player_center_x, player_center_y)
-        light_radius = 130  # or self.player_light_radius if you have
+        light_radius = 130
         self.cut_radial_light(darkness_overlay, player_center, 100)
-
-
-        # Create player light mask using ray casting (if needed, can be added here)
-        player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
-        player_center_y = int(self.player.y - self.camera_x + self.player.size // 2)
-
-        # Collect wall rects in screen space (if needed for future light logic)
 
         # Apply darkness overlay to scene
         virtual_surface.blit(darkness_overlay, (0, 0), special_flags=pygame.BLEND_PREMULTIPLIED)
 
-        # Scale to screen if zoomed
         if abs(self.zoom - 1.0) > 0.05:
             scaled_surface = pygame.transform.scale(virtual_surface, (self.width, self.height))
             self.screen.blit(scaled_surface, (0, 0))
+        else:
+            self.screen.blit(virtual_surface, (0, 0))
 
         # Render UI (always on top)
         self.dungeon.render_ui(self.screen)
-        self.player.render_bars(self.screen, self.screen.get_height())  # top-left corner HUD bars
-        self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())  # top-right corner weapon HUD
-        self.player.render_weapon_info_overlay(self.screen, self.camera_x, self.camera_y, self.room, self.zoom)  # Render weapon info overlay if player is near a weapon
+        self.player.render_bars(self.screen, self.screen.get_height())
+        self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())
+        self.player.render_weapon_info_overlay(self.screen, self.camera_x, self.camera_y, self.room, self.zoom)
 
         # Draw crosshair particles
         for particle in self.crosshair_particles:
-            # Update position based on velocity
             particle['pos'] += particle['velocity'] * self.dt
-
-            # Create particle surface
             particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
             color_with_alpha = (*particle['color'], particle['alpha'])
             pygame.draw.circle(
@@ -648,17 +641,12 @@ class GameEngine:
                 color_with_alpha, 
                 (particle['radius'], particle['radius']), 
                 particle['radius'])
-            
-            # Draw particle
             self.screen.blit(
                 particle_surface,
                 (particle['pos'].x - particle['radius'],
                 particle['pos'].y - particle['radius']))
-            
-        # Draw crosshair at mouse position
-        mouse_pos = pygame.mouse.get_pos()
 
-        # Apply smooth scaling
+        mouse_pos = pygame.mouse.get_pos()
         if abs(self.crosshair_scale - 1.0) > 0.01:
             scaled_size = (int(self.current_crosshair.get_width() * self.crosshair_scale), 
                         int(self.current_crosshair.get_height() * self.crosshair_scale))
@@ -681,16 +669,21 @@ class GameEngine:
             self.screen.blit(fps_text, (10, self.screen.get_height() - fps_text.get_height() - 10))
             self.screen.blit(playerPos_text, (10,  self.screen.get_height() - fps_text.get_height() - 30))
 
+        # --- TUTORIAL TEXT BELOW PLAYER ---
+        if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
+            tutorial_text = self.tutorial_phrases[self.tutorial_step]
+            font = pygame.font.Font(None, 24)
+            text_surf = font.render(tutorial_text, True, (255, 255, 255))
+            px = int(self.player.x - self.camera_x + self.player.size // 2)
+            py = int(self.player.y - self.camera_y + self.player.size)
+            text_rect = text_surf.get_rect(center=(px, py + 18))
+            self.screen.blit(text_surf, text_rect)
+
         pygame.display.flip()
 
-        # Calculate changed areas
         dirty_rects = self.calculate_dirty_rects()
-
-        # Only update changed areas
         for rect in dirty_rects:
             pygame.display.update(rect)
-
-        # Track current drawn areas for next frame
         self.last_drawn_rects = dirty_rects
 
     def calculate_dirty_rects(self):
@@ -710,11 +703,615 @@ class GameEngine:
         
         return dirty_rects
 
+    def run_intro_animation(self):
+        """Cinematic intro: fade-in, player falls, fade-out, then fade-in to gameplay."""
+        intro_duration = 1.5  # seconds
+        fade_duration = 0.8   # seconds for fade-in/out
+        elapsed = 0.0
+        start_y = -200  # Start far above room
+        end_y = self.player.y
+        self.player.y = start_y
+        light_radius = 120
+        clock = pygame.time.Clock()
+
+        # Fade-in from black before fall
+        fade_in_elapsed = 0.0
+        while fade_in_elapsed < fade_duration:
+            dt = clock.tick(120) / 1000.0
+            fade_in_elapsed += dt
+            fade_t = min(fade_in_elapsed / fade_duration, 1.0)
+            alpha = int(255 * (1.0 - fade_t))
+            self.render_intro(light_radius, 0.0)
+            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            fade_surface.fill((0, 0, 0, alpha))
+            self.screen.blit(fade_surface, (0, 0))
+            pygame.display.flip()
+
+        # Falling animation
+        while elapsed < intro_duration:
+            dt = clock.tick(120) / 1000.0
+            elapsed += dt
+            t = min(elapsed / intro_duration, 1.0)
+            eased_t = 1 - pow(1 - t, 3)
+            self.player.y = start_y + (end_y - start_y) * eased_t
+            self.render_intro(light_radius, t)
+        self.player.y = end_y
+
+        # Fade-out to black after landing
+        fade_out_elapsed = 0.0
+        while fade_out_elapsed < fade_duration:
+            dt = clock.tick(120) / 1000.0
+            fade_out_elapsed += dt
+            fade_t = min(fade_out_elapsed / fade_duration, 1.0)
+            alpha = int(255 * fade_t)
+            self.render_intro(light_radius, 1.0)
+            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            fade_surface.fill((0, 0, 0, alpha))
+            self.screen.blit(fade_surface, (0, 0))
+            pygame.display.flip()
+
+        # Fade-in to gameplay
+        fade_in_game_elapsed = 0.0
+        while fade_in_game_elapsed < fade_duration:
+            dt = clock.tick(120) / 1000.0
+            fade_in_game_elapsed += dt
+            fade_t = min(fade_in_game_elapsed / fade_duration, 1.0)
+            alpha = int(255 * (1.0 - fade_t))
+            self.render_intro(light_radius, 1.0)
+            fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            fade_surface.fill((0, 0, 0, alpha))
+            self.screen.blit(fade_surface, (0, 0))
+            pygame.display.flip()
+
+    def render_intro(self, light_radius, t):
+        """Render the intro animation scene with falling player and light, no UI."""
+        current_room = self.dungeon.get_current_room()
+        self.screen.fill((0, 0, 0))
+        current_room.render(self.screen, self.camera_x, self.camera_y)
+        # Draw a radial light at player position, growing as player falls
+        px = int(self.player.x - self.camera_x + self.player.size // 2)
+        py = int(self.player.y - self.camera_y + self.player.size // 2)
+        radius = int(light_radius * (0.5 + 0.5 * t))
+        self.cut_radial_light(self.screen, (px, py), radius, max_alpha=180)
+        # Draw player
+        self.player.render(self.screen, self.camera_x, self.camera_y, [current_room], zoom=self.zoom)
+        # Do NOT draw UI or HUD here
+        pygame.display.flip()
+
     def run(self):
+        self.run_intro_animation()
+        self.tutorial_step = 0
+        self.tutorial_phrases = [
+            "WASD to move, Shift to sprint.",
+            "Press E to pick up weapon, Q to drop."
+        ]
         while self.running:
-            
             self.handle_events()
             self.update()
             self.render()
             self.clock.tick(360)
         pygame.quit()
+
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    self.run_pause_menu()
+                elif event.key == pygame.K_F3:
+                    self.show_fps = not self.show_fps
+                elif event.key == pygame.K_F4:
+                    self.show_collision_rects = not self.show_collision_rects
+                elif event.key == pygame.K_SPACE:
+                    # Advance tutorial if active
+                    if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
+                        self.tutorial_step += 1
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self.mouse_attack_held = True
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self.mouse_attack_held = False
+
+    def update(self):
+        self.dt = self.clock.get_time() / 1000.0  # seconds
+        current_index = self.dungeon.current_room_index
+        adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
+
+        # Always update self.enemies to current room's enemies
+        current_room = self.dungeon.get_current_room()
+        self.enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
+
+        # move player
+        self.player.update(rooms=adjacent_rooms)
+
+        # update room based on player position (bounding box detection)
+        if self.mouse_attack_held:
+            if self.player.attack(self.camera_x, self.camera_y, self.zoom, self.projectiles, self.enemies):
+                print("Ataque executado!")
+        prev_room_index = self.dungeon.current_room_index
+        self.dungeon.update_player_room(self.player.rect)
+        if self.dungeon.current_room_index != prev_room_index:
+            # Track previous room index
+            self.previous_room_index = prev_room_index
+            print(f"[DEBUG] room_opening_sides for {self.dungeon.current_room_index}:",
+                  self.dungeon.room_opening_sides.get(self.dungeon.current_room_index))
+            print(f"[DEBUG] opening_positions for room {self.dungeon.current_room_index}:")
+            for o in self.dungeon.opening_positions:
+                print("   ", o)
+            self.room = self.dungeon.get_current_room()
+            self.enemies = getattr(self.room, 'enemies', []) if hasattr(self.room, 'enemies') else []
+
+        # update camera to follow player
+        self._update_camera()
+        self.update_crosshair(self.dt)
+        self.update_crosshair_particles(self.dt)
+
+        # --- UPDATE PROJECTILES ---
+        if self.mouse_attack_held:
+            self.player.attack(
+                self.camera_x,
+                self.camera_y,
+                self.zoom,
+                self.projectiles
+            )
+
+        # Get wall rects for the current room
+        wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
+        # Get room boundary as a pygame.Rect
+        room_rect = pygame.Rect(current_room.x, current_room.y, current_room.width, current_room.height)
+        for proj in self.projectiles[:]:
+            proj.update(self.dt, self.enemies, wall_rects, room_rect)
+            if not getattr(proj, 'is_alive', True):
+                self.projectiles.remove(proj)
+        # --- UPDATE ENEMIES ---
+        for enemy in self.enemies:
+            enemy.engine = self  # Ensure each enemy can access engine context
+            enemy.update(self.dt, player_pos=(self.player.x, self.player.y), other_enemies=self.enemies, player=self.player)
+
+    def cut_radial_light(self, surface, center, radius, max_alpha=255, wall_rects=None, light_color=(255, 255, 255)):
+        """Enhanced lighting with raycasting and performance optimizations"""
+        # Performance settings
+        PERFORMANCE_MODE = "balanced"  # "fast", "balanced", "quality"
+        
+        # Convert parameters for the lighting system
+        px, py = center
+        color = light_color if light_color else (255, 255, 255)
+        
+        # Convert wall rects from world space to surface space if needed
+        processed_walls = []
+        if wall_rects:
+            for wall in wall_rects:
+                # Convert to surface coordinates (relative to the darkness overlay)
+                wall_x = wall.x - self.camera_x
+                wall_y = wall.y - self.camera_y
+                processed_walls.append(pygame.Rect(wall_x, wall_y, wall.width, wall.height))
+        
+        # Create temporary surface for the light
+        light_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        
+        # Render the volumetric light
+        render_volumetric_light(
+            light_surface,
+            radius, radius,  # Center on our temp surface
+            radius=radius,
+            color=color,
+            breathing_intensity=0.1,
+            flicker_intensity=0.05,
+            wall_rects=processed_walls,
+            performance_mode=PERFORMANCE_MODE
+        )
+        
+        # Subtract the light from darkness (inverse of normal additive blending)
+        surface.blit(light_surface, (px - radius, py - radius), 
+                    special_flags=pygame.BLEND_RGBA_SUB)
+
+
+
+    def render(self):
+        # Render the current room and all adjacent rooms
+        current_room = self.dungeon.get_current_room()
+        current_index = self.dungeon.current_room_index
+        adjacent_rooms = self.dungeon.get_adjacent_rooms(current_index)
+        rooms_to_render = [current_room] + adjacent_rooms
+
+        # Create a virtual surface for zoomed rendering if needed
+        if abs(self.zoom - 1.0) > 0.05:
+            virtual_width = int(self.width / self.zoom)
+            virtual_height = int(self.height / self.zoom)
+            virtual_surface = pygame.Surface((virtual_width, virtual_height))
+            virtual_surface.fill((0, 0, 0))
+        else:
+            virtual_surface = self.screen
+            virtual_width = self.width
+            virtual_height = self.height
+
+        # Render all rooms (current and adjacent)
+        for room in rooms_to_render:
+            room.render(virtual_surface, self.camera_x, self.camera_y, 
+                    show_collision_rects=self.show_collision_rects)
+
+        # --- RENDER ENEMIES IN CURRENT ROOM ---
+        enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
+        for enemy in enemies:
+            enemy.draw(virtual_surface, self.camera_x, self.camera_y)
+
+        # Render the player
+        self.player.render(
+            virtual_surface,
+            self.camera_x,
+            self.camera_y,
+            rooms_to_render,
+            zoom=self.zoom,
+            show_collision_rects=self.show_collision_rects
+        )
+
+        # --- RENDER PROJECTILES ---
+        for proj in self.projectiles:
+            proj.render(virtual_surface, self.camera_x, self.camera_y, self.zoom)
+
+        # --- DARKNESS OVERLAY ---
+        darkness_overlay = pygame.Surface((virtual_width, virtual_height), pygame.SRCALPHA)
+        darkness_overlay.fill((0, 0, 0, 255))  # Fully opaque black
+
+        for light in self.light_sources:
+            light_x = light['pos'][0] - self.camera_x
+            light_y = light['pos'][1] - self.camera_y
+            self.cut_radial_light(
+                darkness_overlay,
+                (light_x, light_y),
+                light['radius'],
+                light['intensity']
+            )
+
+        floor_screen_rect = pygame.Rect(
+            current_room.x - self.camera_x,
+            current_room.y - self.camera_y,
+            current_room.width,
+            current_room.height
+        )
+
+        wall_rects = []
+        for wall in current_room.get_wall_rects():
+            screen_wall = pygame.Rect(
+                wall.x - self.camera_x,
+                wall.y - self.camera_y,
+                wall.width,
+                wall.height
+            )
+            wall_rects.append(screen_wall)
+
+        if wall_rects:
+            union_rect = wall_rects[0].unionall(wall_rects[1:])
+            darkness_overlay.fill((0, 0, 0, 0), union_rect)
+
+        player_center_x = int(self.player.x - self.camera_x + self.player.size // 2)
+        player_center_y = int(self.player.y - self.camera_y + self.player.size // 2)
+        player_center = (player_center_x, player_center_y)
+        light_radius = 130
+        self.cut_radial_light(darkness_overlay, player_center, 100)
+
+        # Apply darkness overlay to scene
+        virtual_surface.blit(darkness_overlay, (0, 0), special_flags=pygame.BLEND_PREMULTIPLIED)
+
+        if abs(self.zoom - 1.0) > 0.05:
+            scaled_surface = pygame.transform.scale(virtual_surface, (self.width, self.height))
+            self.screen.blit(scaled_surface, (0, 0))
+        else:
+            self.screen.blit(virtual_surface, (0, 0))
+
+        # Render UI (always on top)
+        self.dungeon.render_ui(self.screen)
+        self.player.render_bars(self.screen, self.screen.get_height())
+        self.player.render_weapon_hud(self.screen, self.screen.get_width(), self.screen.get_height())
+        self.player.render_weapon_info_overlay(self.screen, self.camera_x, self.camera_y, self.room, self.zoom)
+
+        # Draw crosshair particles
+        for particle in self.crosshair_particles:
+            particle['pos'] += particle['velocity'] * self.dt
+            particle_surface = pygame.Surface((particle['radius']*2, particle['radius']*2), pygame.SRCALPHA)
+            color_with_alpha = (*particle['color'], particle['alpha'])
+            pygame.draw.circle(
+                particle_surface, 
+                color_with_alpha, 
+                (particle['radius'], particle['radius']), 
+                particle['radius'])
+            self.screen.blit(
+                particle_surface,
+                (particle['pos'].x - particle['radius'],
+                particle['pos'].y - particle['radius']))
+
+        mouse_pos = pygame.mouse.get_pos()
+        if abs(self.crosshair_scale - 1.0) > 0.01:
+            scaled_size = (int(self.current_crosshair.get_width() * self.crosshair_scale), 
+                        int(self.current_crosshair.get_height() * self.crosshair_scale))
+            scaled_crosshair = pygame.transform.scale(self.current_crosshair, scaled_size)
+            offset = (scaled_size[0] // 2, scaled_size[1] // 2)
+            self.screen.blit(scaled_crosshair, 
+                            (mouse_pos[0] - offset[0], 
+                            mouse_pos[1] - offset[1]))
+        else:
+            self.screen.blit(self.current_crosshair, 
+                            (mouse_pos[0] - self.crosshair_offset[0], 
+                            mouse_pos[1] - self.crosshair_offset[1]))
+
+        # FPS monitor
+        if self.show_fps:
+            fps = self.clock.get_fps()
+            playerPos = self.player.x, self.player.y
+            fps_text = self.fps_font.render(f"FPS: {fps:.1f}", True, (255, 255, 0))
+            playerPos_text = self.fps_font.render(f"Player Pos: {playerPos}", True, (255, 255, 0))
+            self.screen.blit(fps_text, (10, self.screen.get_height() - fps_text.get_height() - 10))
+            self.screen.blit(playerPos_text, (10,  self.screen.get_height() - fps_text.get_height() - 30))
+
+        # --- TUTORIAL TEXT BELOW PLAYER ---
+        if hasattr(self, 'tutorial_step') and self.tutorial_step < len(self.tutorial_phrases):
+            tutorial_text = self.tutorial_phrases[self.tutorial_step]
+            font_tip = pygame.font.Font(None, 22)
+            font_space = pygame.font.Font(None, 18)
+            tip_surf = font_tip.render(tutorial_text, True, (255, 255, 255))
+            space_surf = font_space.render("Press SPACE for next tip", True, (200, 200, 200))
+            # Calculate player position on screen, accounting for zoom
+            px = int((self.player.x - self.camera_x + self.player.size // 2) * self.zoom)
+            py = int((self.player.y - self.camera_y + self.player.size) * self.zoom)
+            tip_rect = tip_surf.get_rect(center=(px, py + int(22 * self.zoom)))
+            space_rect = space_surf.get_rect(center=(px, tip_rect.bottom + int(14 * self.zoom)))
+            self.screen.blit(tip_surf, tip_rect)
+            self.screen.blit(space_surf, space_rect)
+
+        pygame.display.flip()
+
+        dirty_rects = self.calculate_dirty_rects()
+        for rect in dirty_rects:
+            pygame.display.update(rect)
+        self.last_drawn_rects = dirty_rects
+
+    def calculate_dirty_rects(self):
+        """Calculate areas that need redrawing"""
+        dirty_rects = []
+        
+        # Player movement area
+        player_rect = pygame.Rect(
+            self.player.x - self.camera_x - 50,
+            self.player.y - self.camera_y - 50,
+            100, 100
+        )
+        dirty_rects.append(player_rect)
+        
+        # Add UI area
+        dirty_rects.append(pygame.Rect(0, 0, 200, 100))  # UI area
+        
+        return dirty_rects
+
+    def run_intro_animation(self):
+        """Cinematic intro: dramatic camera pan, player entrance, and smooth transition to gameplay"""
+        # Phase 1: Camera pan through dungeon
+        camera_path = self._create_camera_path()
+        pan_duration = 3.0
+        pan_elapsed = 0.0
+        
+        # Phase 2: Player entrance
+        entrance_duration = 1.5
+        entrance_elapsed = 0.0
+        start_y = -200
+        end_y = self.player.y
+        
+        # Phase 3: Transition to gameplay
+        fade_duration = 1.0
+        fade_elapsed = 0.0
+        
+        clock = pygame.time.Clock()
+        current_phase = 1
+        self.player.y = start_y
+        
+        # Lighting effects
+        light_radius = 0
+        max_light_radius = 180
+        dust_particles = []
+        
+        while current_phase <= 3:
+            dt = clock.tick(60) / 1000.0
+            
+            # Phase 1: Camera pan through dungeon
+            if current_phase == 1:
+                pan_elapsed += dt
+                t = min(pan_elapsed / pan_duration, 1.0)
+                
+                # Smooth camera movement along path
+                self.camera_x, self.camera_y = self._get_camera_position(camera_path, t)
+                
+                # Render dungeon during pan
+                self._render_pan_phase()
+                
+                # Transition to next phase
+                if t >= 1.0:
+                    current_phase = 2
+                    pan_elapsed = 0
+                    
+            # Phase 2: Player entrance
+            elif current_phase == 2:
+                entrance_elapsed += dt
+                t = min(entrance_elapsed / entrance_duration, 1.0)
+                
+                # Ease-out bounce for more dramatic landing
+                eased_t = self._ease_out_bounce(t)
+                self.player.y = start_y + (end_y - start_y) * eased_t
+                
+                # Growing light effect
+                light_radius = int(max_light_radius * t)
+                
+                # Create dust particles on landing
+                if t > 0.8 and len(dust_particles) < 30:
+                    dust_particles.extend(self._create_dust_cloud(
+                        self.player.x + self.player.size//2,
+                        self.player.y + self.player.size
+                    ))
+                
+                # Update dust particles
+                for p in dust_particles[:]:
+                    p['time'] += dt
+                    if p['time'] > p['lifetime']:
+                        dust_particles.remove(p)
+                
+                # Render entrance with effects
+                self._render_entrance_phase(light_radius, dust_particles)
+                
+                # Transition to next phase
+                if t >= 1.0:
+                    current_phase = 3
+                    entrance_elapsed = 0
+                    
+            # Phase 3: Fade to gameplay
+            elif current_phase == 3:
+                fade_elapsed += dt
+                fade_t = min(fade_elapsed / fade_duration, 1.0)
+                
+                # Render gameplay but with fade overlay
+                self.update()
+                self.render()
+                
+                # Create fade overlay
+                overlay_alpha = int(255 * (1.0 - fade_t))
+                fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                fade_surface.fill((0, 0, 0, overlay_alpha))
+                self.screen.blit(fade_surface, (0, 0))
+                
+                pygame.display.flip()
+                
+                # End intro
+                if fade_t >= 1.0:
+                    break
+
+    def _create_camera_path(self):
+        """Create an interesting camera path through the dungeon"""
+        path = []
+        current_room = self.dungeon.get_current_room()
+        
+        # Start point: show the whole dungeon
+        path.append((current_room.x - 300, current_room.y - 200))
+        
+        # Mid point: focus on an interesting feature
+        path.append((current_room.x + current_room.width//3, current_room.y + current_room.height//3))
+        
+        # End point: where player will appear
+        path.append((self.player.x - self.width//2, self.player.y - self.height//2))
+        
+        return path
+
+    def _get_camera_position(self, path, t):
+        """Get smooth camera position along path"""
+        if t < 0.5:
+            segment_t = t * 2
+            start_x, start_y = path[0]
+            end_x, end_y = path[1]
+        else:
+            segment_t = (t - 0.5) * 2
+            start_x, start_y = path[1]
+            end_x, end_y = path[2]
+        
+        # Cubic easing for smooth movement
+        eased_t = segment_t * segment_t * (3 - 2 * segment_t)
+        return (
+            start_x + (end_x - start_x) * eased_t,
+            start_y + (end_y - start_y) * eased_t
+        )
+
+    def _ease_out_bounce(self, t):
+        """Bounce easing function for landing effect"""
+        if t < 1/2.75:
+            return 7.5625*t*t
+        elif t < 2/2.75:
+            t -= 1.5/2.75
+            return 7.5625*t*t + 0.75
+        elif t < 2.5/2.75:
+            t -= 2.25/2.75
+            return 7.5625*t*t + 0.9375
+        else:
+            t -= 2.625/2.75
+            return 7.5625*t*t + 0.984375
+
+    def _create_dust_cloud(self, x, y):
+        """Create dust particle effects for landing"""
+        particles = []
+        for _ in range(8):
+            particles.append({
+                'x': x,
+                'y': y,
+                'size': random.randint(3, 8),
+                'speed': random.uniform(0.5, 2.0),
+                'angle': random.uniform(0, math.pi*2),
+                'lifetime': random.uniform(0.5, 1.2),
+                'time': 0,
+                'color': (200, 180, 150)
+            })
+        return particles
+
+    def _render_pan_phase(self):
+        """Render during camera pan phase"""
+        self.screen.fill((0, 0, 0))
+        current_room = self.dungeon.get_current_room()
+        current_room.render(self.screen, self.camera_x, self.camera_y)
+        
+        # Add dramatic lighting
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+        
+        # Add vignette effect
+        vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        pygame.draw.circle(vignette, (0, 0, 0, 0), 
+                        (self.width//2, self.height//2), 
+                        self.width//3)
+        pygame.draw.circle(vignette, (0, 0, 0, 200), 
+                        (self.width//2, self.height//2), 
+                        self.width//2, self.width//3)
+        self.screen.blit(vignette, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        
+        pygame.display.flip()
+
+    def _render_entrance_phase(self, light_radius, dust_particles):
+        """Render during player entrance phase"""
+        self.screen.fill((0, 0, 0))
+        current_room = self.dungeon.get_current_room()
+        current_room.render(self.screen, self.camera_x, self.camera_y)
+        
+        # Draw player with landing animation
+        self.player.render(self.screen, self.camera_x, self.camera_y, [current_room], zoom=self.zoom)
+        
+        # Draw light around player
+        px = int(self.player.x - self.camera_x + self.player.size // 2)
+        py = int(self.player.y - self.camera_y + self.player.size // 2)
+        self.cut_radial_light(self.screen, (px, py), light_radius, max_alpha=180)
+        
+        # Draw dust particles
+        for p in dust_particles:
+            alpha = int(255 * (1 - p['time']/p['lifetime']))
+            size = int(p['size'] * (1 - p['time']/(p['lifetime']*2)))
+            if size < 1:
+                continue
+                
+            # Move particle
+            p['x'] += math.cos(p['angle']) * p['speed'] * 10
+            p['y'] += math.sin(p['angle']) * p['speed'] * 10
+            
+            # Convert to screen coords
+            screen_x = int(p['x'] - self.camera_x)
+            screen_y = int(p['y'] - self.camera_y)
+            
+            # Draw particle
+            particle_surf = pygame.Surface((size*2, size*2), pygame.SRCALPHA)
+            color = (*p['color'], alpha)
+            pygame.draw.circle(particle_surf, color, (size, size), size)
+            self.screen.blit(particle_surf, (screen_x - size, screen_y - size))
+        
+        # Apply vignette effect
+        vignette = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        pygame.draw.circle(vignette, (0, 0, 0, 0), 
+                        (self.width//2, self.height//2), 
+                        self.width//3)
+        pygame.draw.circle(vignette, (0, 0, 0, 150), 
+                        (self.width//2, self.height//2), 
+                        self.width//2, self.width//3)
+        self.screen.blit(vignette, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        
+        pygame.display.flip()

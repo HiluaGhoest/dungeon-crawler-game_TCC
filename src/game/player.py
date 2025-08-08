@@ -20,6 +20,8 @@ class Player:
         self.size = size
         self.rect = pygame.Rect(self.x, self.y, self.size, self.size)
         self.interact_key_pressed = False
+        self.immunity_timer = 0.0
+        self.immunity_duration = 0.3  # seconds of immunity after taking damage
         # Swing state now handled by weapon (if MeleeWeapon)
 
         # Health, Stamina
@@ -253,20 +255,41 @@ class Player:
                     else:
                         pillar.interact(self)
 
-    def attack(self, camera_x=0, camera_y=0, zoom=1.0, projectiles=None):
+    def attack(self, camera_x=0, camera_y=0, zoom=1.0, projectiles=None, enemies=None):
         weapon = self.get_active_weapon()
         if not weapon:
-            return False
-        if projectiles is None:
             return False
         angle = self.get_mouse_angle(camera_x, camera_y, zoom)
         print(f"Player world pos: ({self.x}, {self.y})")
         print(f"Camera offset: ({camera_x}, {camera_y})")
         player_center = (self.x, self.y)
         if isinstance(weapon, RangedWeapon):
+            if projectiles is None:
+                return False
+            # Ranged weapons: let projectile handle damage, but optionally support floating numbers if you want
             return weapon.attack(player_center, angle, projectiles=projectiles)
         elif isinstance(weapon, MeleeWeapon):
-            return weapon.attack(player_center, angle)
+            # Damage enemies in range and arc
+            hit = False
+            if enemies:
+                attack_range = getattr(weapon, 'attack_range', 80)
+                attack_angle = angle
+                arc_width = math.radians(70)  # 70 degree arc
+                damage = getattr(weapon, 'damage', 10)
+                for enemy in enemies:
+                    dx = enemy.x + enemy.size/2 - player_center[0]
+                    dy = enemy.y + enemy.size/2 - player_center[1]
+                    dist = math.hypot(dx, dy)
+                    if dist <= attack_range:
+                        angle_to_enemy = math.atan2(dy, dx)
+                        diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
+                        if diff < arc_width/2:
+                            if hasattr(weapon, 'can_deal_damage') and weapon.can_deal_damage():
+                                enemy.take_damage(damage)
+                                # Floating damage handled in enemy.take_damage
+                                print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
+                                hit = True
+            return weapon.attack(player_center, angle) or hit
         return False
 
     def get_active_weapon(self):
@@ -428,7 +451,12 @@ class Player:
     
         # Example methods to modify attributes safely
     def take_damage(self, amount):
-        self.health = max(0, self.health - amount)
+        if self.immunity_timer <= 0.0:
+            self.health = max(0, self.health - amount)
+            print(f"Player took {amount} damage! Current health: {self.health}")
+            self.immunity_timer = self.immunity_duration
+        else:
+            print("Player is immune to damage!")
 
     def restore_health(self, amount):
         self.health = min(self.max_health, self.health + amount)
@@ -648,6 +676,11 @@ class Player:
 
     def update(self, rooms=None, dt=0.016 ):
         self.handle_input(rooms)
+        # Update immunity timer
+        if self.immunity_timer > 0.0:
+            self.immunity_timer -= dt
+            if self.immunity_timer < 0.0:
+                self.immunity_timer = 0.0
 
         # Regenerate stamina if not sprinting or moving
         keys = pygame.key.get_pressed()

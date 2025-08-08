@@ -2,7 +2,7 @@ import pygame
 import random
 from collections import defaultdict, deque
 from game.room_generator import RoomGenerator
-from game.enemy import Enemy
+from game.enemy import Enemy, VoidWrath
 
 
 class Dungeon:
@@ -142,7 +142,8 @@ class Dungeon:
                     visited.add(child_idx)
 
                     # Criar inimigos na sala filha
-                    self.spawn_enemies_in_room(child_idx, num_enemies=self.room_depth[child_idx] * 2)
+                    self.spawn_enemies_in_room(child_idx, num_enemies=self.room_depth[child_idx] * 2, 
+                                               enemy_classes=[Enemy, VoidWrath])
 
         print(f"[DUNGEON] Created {rooms_created} rooms with branching structure")
         print(f"Room connections: {self.room_connections}")
@@ -1642,13 +1643,34 @@ class Dungeon:
                 spawn_x = room.x + random.randint(enemy_size, max(enemy_size, room.width - enemy_size))
                 spawn_y = room.y + random.randint(enemy_size, max(enemy_size, room.height - enemy_size))
                 if is_valid_enemy_spawn(room, spawn_x, spawn_y, enemy_size):
-                    room.enemies.append(enemy_cls(spawn_x, spawn_y))
-                    print(f"[SPAWN] Spawned {enemy_cls.__name__} {i} in room {room_idx} at ({spawn_x}, {spawn_y})")
-                    break
+                    # Check for overlap with already spawned enemies
+                    new_rect = pygame.Rect(spawn_x, spawn_y, enemy_size, enemy_size)
+                    overlap = False
+                    for existing_enemy in room.enemies:
+                        if new_rect.colliderect(existing_enemy.rect):
+                            overlap = True
+                            break
+                    if not overlap:
+                        room.enemies.append(enemy_cls(spawn_x, spawn_y))
+                        print(f"[SPAWN] Spawned {enemy_cls.__name__} {i} in room {room_idx} at ({spawn_x}, {spawn_y})")
+                        break
                 attempts += 1
             else:
+                # Fallback: find a non-overlapping position near center
                 center_x = room.x + room.width // 2
                 center_y = room.y + room.height // 2
-                room.enemies.append(enemy_cls(center_x, center_y))
-                print(f"[SPAWN] Fallback {enemy_cls.__name__} {i} in room {room_idx} at ({center_x}, {center_y})")
+                fallback_rect = pygame.Rect(center_x, center_y, enemy_size, enemy_size)
+                overlap = False
+                for existing_enemy in room.enemies:
+                    if fallback_rect.colliderect(existing_enemy.rect):
+                        overlap = True
+                        break
+                if not overlap:
+                    room.enemies.append(enemy_cls(center_x, center_y))
+                    print(f"[SPAWN] Fallback {enemy_cls.__name__} {i} in room {room_idx} at ({center_x}, {center_y})")
+                else:
+                    # If all else fails, just offset from center
+                    offset = (i+1) * enemy_size
+                    room.enemies.append(enemy_cls(center_x + offset, center_y + offset))
+                    print(f"[SPAWN] Emergency Fallback {enemy_cls.__name__} {i} in room {room_idx} at ({center_x + offset}, {center_y + offset})")
         print(f"[SPAWN] Room {room_idx} (depth {self.room_depth.get(room_idx, 0)}) has {len(room.enemies)} enemies.")

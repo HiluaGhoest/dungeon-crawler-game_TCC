@@ -5,6 +5,9 @@ import random
 from game.weapons.weapon import Weapon
 
 class MeleeWeapon(Weapon):
+    def can_deal_damage(self):
+        """Returns True if weapon is in the damage-dealing phase (phase 3)."""
+        return self.swing_phase == 3
     def __init__(self, name, sprite_path=None, color=(200, 100, 100), damage=10, attack_range=80):
         super().__init__(name, sprite_path, color)
         self.damage = damage
@@ -125,6 +128,9 @@ class MeleeWeapon(Weapon):
         pass
 
 class SteelSword(MeleeWeapon):
+    def can_deal_damage(self):
+        """Returns True if sword is in the damage-dealing phase (phase 2)."""
+        return self.swing_phase == 2
     def __init__(self):
         super().__init__(name="Steel Sword", sprite_path=None, color=(220, 220, 60))
         from game.assets import get_image
