@@ -1,7 +1,5 @@
-
 import math
 import time
-from numpy import angle, eye
 import pygame
 from pygame import gfxdraw
 from game.weapons.weapon import Weapon
@@ -9,12 +7,36 @@ from game.weapons.melee_weapons import MeleeWeapon
 from game.weapons.ranged_weapons import RangedWeapon
 from game.util.ui import ease_out_cubic
 from game.assets import get_image, load_audio
+import random
 
+from sound_manager import SoundManager
 
 class Player:
-    _pickup_sound = load_audio('game/sounds/effects/pick_up_weapon.wav')
+    def add_status(self, status_name, **kwargs):
+        print(f"[DEBUG] Player: Adding status '{status_name}' with {kwargs}")
+        if not hasattr(self, 'status_effects'):
+            self.status_effects = {}
+        self.status_effects[status_name] = kwargs
+        print(f"[DEBUG] Player: Current status effects: {self.status_effects}")
+    # Cache for footprint surfaces: (radius, alpha, side) -> Surface
+    _footprint_surface_cache = {}
+    # Cache for shadow surfaces: (width, height, alpha) -> Surface
+    _shadow_surface_cache = {}
+    # Cache for player body surfaces: (width, height, color, alpha) -> Surface
+    _player_surface_cache = {}
+    # Cache for death chunk surfaces: (size, color, alpha) -> Surface
+    _death_chunk_surface_cache = {}
+    # Cache for slot images by size
+    _slot_image_cache = {}
+    # Cache for horseshoe images by size and rotation
+    _horseshoe_image_cache = {}
+    _pickup_sound = load_audio('game/sounds/effects/change_weapons.wav')
     _swap_weapon_sound = load_audio('game/sounds/effects/change_weapons.wav')
-    def __init__(self, x, y, speed=5, color=(255, 255, 255), size=16, sprite_path=None):
+    _die_sound = load_audio('game/sounds/effects/player_die.wav')
+    _hit_sound = load_audio('game/sounds/effects/player_hit.wav')
+    _pickup_sound.set_volume(2.0)
+    _swap_weapon_sound.set_volume(2.0)
+    def __init__(self, x, y, speed=5, color=(255, 255, 255), size=16):
         self.x = x
         self.y = y
         self.speed = speed
@@ -49,16 +71,8 @@ class Player:
         self.blink_duration = 0.2       # duração do piscar (segundos)
         self.is_blinking = False
 
-
-
-        if sprite_path:
-            # Load and scale the sprite to the desired size
-            sprite_image = get_image("player_sprite", sprite_path)
-            if sprite_image:
-                self.sprite = pygame.transform.scale(sprite_image, (self.size, self.size))
-            else:
-                self.sprite = None
-                self.color = (255, 255, 255)  # fallback color
+        self.sprite = None  # Disable sprite rendering to allow animation
+        self.color = color  # Use the provided color
 
             
         self.dropped_weapons = []  # List of (weapon, position)
@@ -68,6 +82,51 @@ class Player:
         self._last_footprint_pos = (self.x, self.y)
         self._footprint_distance = 18  # Minimum distance to leave a new footprint
         self._footprint_side = "left"  # Alternates between 'left' and 'right'
+
+        # Power-up system
+        self.powerups = {}  # theme -> current tier (int)
+        self.active_powerup_effects = []  # List of effect functions to apply
+        self.attack_held = False  # Track if attack button is held
+
+    def get_powerup_tier(self, theme):
+            """Get current tier for a theme."""
+            return self.powerups.get(theme, 0)
+
+    def apply_powerup(self, powerup):
+        print(f"[DEBUG] Player: Applying power-up '{powerup.name}' (Theme: {powerup.theme}, Tier: {powerup.tier})")
+        self.powerups[powerup.theme] = powerup.tier
+        if not hasattr(self, 'stored_powerup_effects'):
+            self.stored_powerup_effects = []
+        # Determine effect type from theme or effect_func
+        effect_type = None
+        if hasattr(powerup, 'theme') and powerup.theme:
+            if powerup.theme.lower() == 'poison':
+                try:
+                    from game.effects import PoisonEffect
+                    effect_type = PoisonEffect
+                except ImportError:
+                    effect_type = None
+            # Add more themes here as needed
+        # Fallback: try effect_func name
+        if not effect_type and hasattr(powerup, 'effect_func') and powerup.effect_func:
+            func_name = powerup.effect_func.__name__
+            if 'poison' in func_name:
+                try:
+                    from game.effects import PoisonEffect
+                    effect_type = PoisonEffect
+                except ImportError:
+                    effect_type = None
+        if effect_type and effect_type not in self.stored_powerup_effects:
+            self.stored_powerup_effects.append(effect_type)
+            print(f"[DEBUG][Player] Stored power-up effect type: {effect_type}")
+        if powerup.effect_func not in self.active_powerup_effects:
+            self.active_powerup_effects.append(powerup.effect_func)
+        print(f"[DEBUG] Player: Calling effect function for '{powerup.name}'")
+        powerup.apply(self)
+        print(f"[DEBUG] Player: Power-up '{powerup.name}' applied. Current powerups: {self.powerups}")
+
+    def has_powerup(self, theme, tier):
+        return self.powerups.get(theme, 0) >= tier
 
     def render_weapon_hud(self, surface, screen_width, screen_height):
         # HUD: 3 squares at bottom right, using images for slots and weapon sprites
@@ -104,10 +163,13 @@ class Player:
             rect = pygame.Rect(0, 0, slot_size, slot_size)
             rect.center = (cx, cy)
 
-            # Draw slot background image with animation
+            # Draw slot background image with animation (cache scaled images)
             if selected_img_raw and not_selected_img_raw:
-                img = selected_img_raw if i == self.active_weapon_index else not_selected_img_raw
-                img_scaled = pygame.transform.smoothscale(img, (slot_size, slot_size))
+                img_key = ("selected" if i == self.active_weapon_index else "not_selected", slot_size)
+                if img_key not in Player._slot_image_cache:
+                    img = selected_img_raw if i == self.active_weapon_index else not_selected_img_raw
+                    Player._slot_image_cache[img_key] = pygame.transform.smoothscale(img, (slot_size, slot_size))
+                img_scaled = Player._slot_image_cache[img_key]
                 surface.blit(img_scaled, rect)
             else:
                 color = (255, 255, 0) if i == self.active_weapon_index else (180, 180, 180)
@@ -130,8 +192,12 @@ class Player:
                 if hasattr(weapon, 'render_hud_sprite'):
                     weapon.render_hud_sprite(surface, rect, sprite_size)
                 elif hasattr(weapon, 'sprite') and weapon.sprite is not None:
-                    sprite = weapon.sprite
-                    weapon_img = pygame.transform.smoothscale(sprite, (sprite_size, sprite_size))
+                    # Cache weapon sprite scaling
+                    if not hasattr(weapon, '_hud_sprite_cache'):
+                        weapon._hud_sprite_cache = {}
+                    if sprite_size not in weapon._hud_sprite_cache:
+                        weapon._hud_sprite_cache[sprite_size] = pygame.transform.smoothscale(weapon.sprite, (sprite_size, sprite_size))
+                    weapon_img = weapon._hud_sprite_cache[sprite_size]
                     sprite_rect = weapon_img.get_rect(center=rect.center)
                     surface.blit(weapon_img, sprite_rect)
                     
@@ -262,14 +328,12 @@ class Player:
         if not weapon:
             return False
         angle = self.get_mouse_angle(camera_x, camera_y, zoom)
-        print(f"Player world pos: ({self.x}, {self.y})")
-        print(f"Camera offset: ({camera_x}, {camera_y})")
         player_center = (self.x, self.y)
         if isinstance(weapon, RangedWeapon):
             if projectiles is None:
                 return False
             # Ranged weapons: let projectile handle damage, but optionally support floating numbers if you want
-            return weapon.attack(player_center, angle, projectiles=projectiles)
+            return weapon.attack(player_center, angle, projectiles=projectiles, enemies=enemies)
         elif isinstance(weapon, MeleeWeapon):
             # Damage enemies in range and arc
             hit = False
@@ -294,20 +358,25 @@ class Player:
                                 # Só aplica dano se ainda não atingiu esse inimigo nesse swing
                                 if enemy not in weapon._already_hit_enemies:
                                     enemy.take_damage(damage)
-                                    print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
+                                    weapon.apply_effects(enemy)
                                     weapon._already_hit_enemies.add(enemy)
                                     hit = True
                 # Limpa lista de inimigos atingidos ao terminar o swing
                 if weapon.swing_phase == 0 and hasattr(weapon, '_already_hit_enemies'):
                     weapon._already_hit_enemies.clear()
             # O ataque só inicia o swing, o dano é processado acima
-            return weapon.attack(player_center, angle) or hit
+            return weapon.attack(player_center, angle, enemies=enemies, attack_held=self.attack_held) or hit
         return False
 
     def get_active_weapon(self):
-        if 0 <= self.active_weapon_index < len(self.weapons):
-            return self.weapons[self.active_weapon_index]
-        return None
+        weapon = self.weapons[self.active_weapon_index] if 0 <= self.active_weapon_index < len(self.weapons) else None
+        # Apply stored power-up effects to weapon if not already present
+        if weapon and hasattr(self, 'stored_powerup_effects'):
+            for effect in self.stored_powerup_effects:
+                if effect and effect not in weapon.effects:
+                    weapon.effects.append(effect)
+                    print(f"[DEBUG][Player] Applied stored effect {effect} to weapon {weapon}")
+        return weapon
 
     @property
     def weapon(self):
@@ -341,9 +410,10 @@ class Player:
                 # Play pickup sound
                 if Player._pickup_sound:
                     try:
-                        Player._pickup_sound.play()
+                        SoundManager.get_instance().play_sfx(Player._pickup_sound)
                     except Exception:
                         pass
+                self.apply_effects_to_all_weapons()  # Ensure new weapon gets all effects
                 return True
         return False
 
@@ -366,7 +436,8 @@ class Player:
         # Play swap sound if weapon changed
         if self.active_weapon_index != prev_weapon_index:
             if Player._swap_weapon_sound:
-                Player._swap_weapon_sound.play()
+                SoundManager.get_instance().play_sfx(Player._swap_weapon_sound)
+            self.apply_effects_to_all_weapons()
 
         # Drop weapon (Q)
         if keys[pygame.K_q]:
@@ -413,6 +484,8 @@ class Player:
         if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
             new_x += move_speed
 
+        mouse_buttons = pygame.mouse.get_pressed()
+        self.attack_held = mouse_buttons[0]  # True if left mouse button is held
         # Horizontal move
         if new_x != old_x:
             temp_rect = pygame.Rect(new_x, self.y, self.size, self.size)
@@ -462,13 +535,23 @@ class Player:
 
     
     def _check_collision(self, player_rect, rooms):
+        # First check against room bounding box
         for room in rooms:
             room_rect = pygame.Rect(room.x, room.y, room.width, room.height)
-            # Optional: skip room if player is far
-            if not room_rect.colliderect(player_rect.inflate(64, 64)):
-                continue
+            if not room_rect.colliderect(player_rect):
+                continue  # Skip rooms not near player
 
+            # Only check walls close to the player
+            nearby_walls = []
             for wall in room.get_wall_rects():
+                # Check if wall is within a certain distance from the player
+                # Use a margin (e.g., 64px) around the player
+                margin = 64
+                expanded_player_rect = player_rect.inflate(margin, margin)
+                if expanded_player_rect.colliderect(wall):
+                    nearby_walls.append(wall)
+
+            for wall in nearby_walls:
                 if player_rect.colliderect(wall):
                     return True
         return False
@@ -479,6 +562,10 @@ class Player:
             self.health = max(0, self.health - amount)
             print(f"Player took {amount} damage! Current health: {self.health}")
             self.immunity_timer = self.immunity_duration
+            if self._hit_sound:
+                SoundManager.get_instance().play_sfx(self._hit_sound)
+            if self.health <= 0:
+                self.die()
         else:
             print("Player is immune to damage!")
 
@@ -584,16 +671,18 @@ class Player:
         from game.assets import get_image
         horseshoe_img = get_image("horseshoe", "game/assets/sprites/ui/horseshoe.png")
         if horseshoe_img:
-            # Scale the horseshoe to fit the arc_radius
-            scale_factor = (arc_radius * 2) / max(horseshoe_img.get_width(), horseshoe_img.get_height())
-            new_size = (int(horseshoe_img.get_width() * scale_factor), int(horseshoe_img.get_height() * scale_factor))
-            horseshoe_img = pygame.transform.smoothscale(horseshoe_img, new_size)
-            # Rotate if inverted
-            if invert:
-                horseshoe_img = pygame.transform.rotate(horseshoe_img, 180)
-            # Center the image on (circle_x, circle_y)
-            img_rect = horseshoe_img.get_rect(center=(circle_x, circle_y))
-            surface.blit(horseshoe_img, img_rect)
+            # Cache horseshoe image by size and rotation
+            cache_key = (arc_radius, invert)
+            if cache_key not in Player._horseshoe_image_cache:
+                scale_factor = (arc_radius * 2) / max(horseshoe_img.get_width(), horseshoe_img.get_height())
+                new_size = (int(horseshoe_img.get_width() * scale_factor), int(horseshoe_img.get_height() * scale_factor))
+                img = pygame.transform.smoothscale(horseshoe_img, new_size)
+                if invert:
+                    img = pygame.transform.rotate(img, 180)
+                Player._horseshoe_image_cache[cache_key] = img
+            horseshoe_img_cached = Player._horseshoe_image_cache[cache_key]
+            img_rect = horseshoe_img_cached.get_rect(center=(circle_x, circle_y))
+            surface.blit(horseshoe_img_cached, img_rect)
         else:
             # Fallback: draw a simple white circle if asset missing
             pygame.draw.circle(surface, (255,255,255), (circle_x, circle_y), arc_radius, 2)
@@ -611,8 +700,7 @@ class Player:
             value_rect = value_surface.get_rect()
             # Label text (smaller, but same custom font)
             from game.assets import get_font
-            font_path = getattr(font, 'path', "game/assets/fonts/CinzelDecorative-Black.ttf")
-            label_font = get_font(font_path, max(12, font.get_height() // 2))
+            label_font = get_font("game/assets/fonts/CinzelDecorative-Black.ttf", max(12, font.get_height() // 2))
             label_surface = label_font.render(label, True, (255, 255, 255))
             label_rect = label_surface.get_rect()
 
@@ -741,35 +829,10 @@ class Player:
 
         # Swing logic now handled by weapon
         weapon = self.get_active_weapon()
-        if weapon and hasattr(weapon, 'update'):
-            weapon.update(dt)
 
-        # --- Aplica dano durante a fase 2 do swing, mesmo após o clique ---
-        if enemies and weapon and hasattr(weapon, 'can_deal_damage') and weapon.can_deal_damage():
-            attack_range = getattr(weapon, 'attack_range', 80)
-            damage = getattr(weapon, 'damage', 10)
-            # Usa o ângulo do swing salvo na arma
-            attack_angle = getattr(weapon, 'swing_angle', None)
-            if attack_angle is None:
-                attack_angle = self.get_mouse_angle()
-            arc_width = math.radians(70)
-            player_center = (self.x, self.y)
-            if not hasattr(weapon, '_already_hit_enemies') or weapon.swing_phase == 0:
-                weapon._already_hit_enemies = set()
-            for enemy in enemies:
-                dx = enemy.x + enemy.size/2 - player_center[0]
-                dy = enemy.y + enemy.size/2 - player_center[1]
-                dist = math.hypot(dx, dy)
-                if dist <= attack_range:
-                    angle_to_enemy = math.atan2(dy, dx)
-                    diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
-                    if diff < arc_width/2:
-                        if enemy not in weapon._already_hit_enemies:
-                            enemy.take_damage(damage)
-                            print(f"Hit enemy at ({enemy.x}, {enemy.y}) for {damage} damage!")
-                            weapon._already_hit_enemies.add(enemy)
-            if weapon.swing_phase == 0 and hasattr(weapon, '_already_hit_enemies'):
-                weapon._already_hit_enemies.clear()
+        # Weapon handles damage/effects application itself using _already_hit_enemies logic
+        if weapon and hasattr(weapon, 'update'):
+            weapon.update(dt, enemies=enemies, attack_held=self.attack_held)
 
         # Atualiza bob dos olhos
         self.eye_bob_timer += dt
@@ -787,6 +850,10 @@ class Player:
 
     # Death animation support: fade out and shrink
     def render(self, surface, camera_x=0, camera_y=0, rooms=None, zoom=1.0, show_collision_rects=False, dt=0.016):
+                # Check if we should draw death animation instead of normal player
+        if hasattr(self, 'is_dead') and self.is_dead:
+            self.draw_death_animation(surface, camera_x, camera_y)
+            return  # Always skip normal drawing when dead
         # Death animation: fade out and shrink
         death_t = getattr(self, '_death_anim_progress', None)
         fade_alpha = 255
@@ -839,8 +906,14 @@ class Player:
         shadow_height = int(self.size * 0.4 * shrink_scale)
         shadow_x = render_x + (self.size * shrink_scale - shadow_width) // 2
         shadow_y = render_y + self.size * shrink_scale - shadow_height // 2
-        shadow_surf = pygame.Surface((shadow_width, shadow_height), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow_surf, (0, 0, 0, int(80 * (fade_alpha / 255))), (0, 0, shadow_width, shadow_height))
+        shadow_alpha = int(80 * (fade_alpha / 255))
+        shadow_key = (shadow_width, shadow_height, shadow_alpha)
+        if shadow_key not in Player._shadow_surface_cache:
+            shadow_surf = pygame.Surface((shadow_width, shadow_height), pygame.SRCALPHA)
+            pygame.draw.ellipse(shadow_surf, (0, 0, 0, shadow_alpha), (0, 0, shadow_width, shadow_height))
+            Player._shadow_surface_cache[shadow_key] = shadow_surf
+        else:
+            shadow_surf = Player._shadow_surface_cache[shadow_key]
         surface.blit(shadow_surf, (shadow_x, shadow_y))
 
         # --- Render footprints ---
@@ -853,29 +926,35 @@ class Player:
         self.footprints = [fp for fp in self.footprints if now - fp[2] < fade_time]
         for fp_x, fp_y, fp_time, fp_side in self.footprints[-max_footprints:]:
             alpha = max(0, 255 - int((now - fp_time) / fade_time * 255))
-            # Optionally, rotate/shape footprint based on side
-            footprint_surf = pygame.Surface((footprint_radius*2, footprint_radius*2), pygame.SRCALPHA)
-            pygame.draw.ellipse(
-                footprint_surf,
-                (*footprint_color, alpha),
-                (0, footprint_radius//2, footprint_radius*2, footprint_radius)
-            )
-            # Optionally flip for right side
-            if fp_side == "right":
-                footprint_surf = pygame.transform.flip(footprint_surf, True, False)
+            cache_key = (footprint_radius, alpha, fp_side)
+            if cache_key not in Player._footprint_surface_cache:
+                footprint_surf = pygame.Surface((footprint_radius*2, footprint_radius*2), pygame.SRCALPHA)
+                pygame.draw.ellipse(
+                    footprint_surf,
+                    (*footprint_color, alpha),
+                    (0, footprint_radius//2, footprint_radius*2, footprint_radius)
+                )
+                if fp_side == "right":
+                    footprint_surf = pygame.transform.flip(footprint_surf, True, False)
+                Player._footprint_surface_cache[cache_key] = footprint_surf
+            else:
+                footprint_surf = Player._footprint_surface_cache[cache_key]
             surface.blit(footprint_surf, (fp_x - footprint_radius - camera_x, fp_y - footprint_radius - camera_y))
+
+        # --- Get mouse position once ---
+        mouse_screen_x, mouse_screen_y = pygame.mouse.get_pos()
+        mouse_virtual_x = mouse_screen_x / zoom
+        mouse_virtual_y = mouse_screen_y / zoom
+        world_mouse_x = mouse_virtual_x + camera_x
+        world_mouse_y = mouse_virtual_y + camera_y
+
+        player_center_x = self.x + self.size // 2
+        player_center_y = self.y + self.size // 2
+        player_center = (player_center_x, player_center_y)
 
         # Weapon rendering delegated to weapon class
         weapon = self.get_active_weapon()
         if weapon and hasattr(weapon, 'render'):
-            mouse_screen_x, mouse_screen_y = pygame.mouse.get_pos()
-            mouse_virtual_x = mouse_screen_x / zoom
-            mouse_virtual_y = mouse_screen_y / zoom
-            world_mouse_x = mouse_virtual_x + camera_x
-            world_mouse_y = mouse_virtual_y + camera_y
-            player_center_x = self.x + self.size // 2
-            player_center_y = self.y + self.size // 2
-            player_center = (player_center_x, player_center_y)
             angle = self.get_mouse_angle(camera_x, camera_y, zoom)
             # Pass dt to weapon.render if it accepts it
             try:
@@ -895,14 +974,10 @@ class Player:
                     dropped_weapon.render_static(surface, (pos[0] - camera_x, pos[1] - camera_y), camera_x, camera_y, zoom)
 
         # --- pega posição do mouse no mundo ---
-        mouse_screen_x, mouse_screen_y = pygame.mouse.get_pos()
-        mouse_virtual_x = mouse_screen_x / zoom + camera_x
-        mouse_virtual_y = mouse_screen_y / zoom + camera_y
+        mouse_virtual_x_world = mouse_screen_x / zoom + camera_x
+        mouse_virtual_y_world = mouse_screen_y / zoom + camera_y
 
-        player_center_x = self.x + self.size // 2
-        player_center_y = self.y + self.size // 2
-
-        dx = mouse_virtual_x - player_center_x
+        dx = mouse_virtual_x_world - player_center_x
 
         eye_offset = 2
         if dx > 5:
@@ -929,8 +1004,13 @@ class Player:
         new_x = base_x - new_width / 2
 
         player_rect = pygame.Rect(new_x, new_y, new_width, new_height)
-        player_surf = pygame.Surface((new_width, new_height), pygame.SRCALPHA)
-        player_surf.fill((*self.color, fade_alpha))
+        player_key = (new_width, new_height, tuple(self.color), fade_alpha)
+        if player_key not in Player._player_surface_cache:
+            player_surf = pygame.Surface((new_width, new_height), pygame.SRCALPHA)
+            player_surf.fill((*self.color, fade_alpha))
+            Player._player_surface_cache[player_key] = player_surf
+        else:
+            player_surf = Player._player_surface_cache[player_key]
         surface.blit(player_surf, player_rect)
 
         # Olhos
@@ -949,3 +1029,96 @@ class Player:
         eye_surf.fill(eye_color)
         surface.blit(eye_surf, (left_eye_x, eye_y))
         surface.blit(eye_surf, (right_eye_x, eye_y))
+
+    def die(self):
+        # Play player death sound
+        if Player._die_sound:
+            SoundManager.get_instance().play_sfx(Player._die_sound)
+        # Death animation: pixel explosion
+        self.is_dead = True
+        self.death_timer = 0.0
+        self.death_duration = 0.5  # total animation time
+        self.death_chunks = []
+        n_chunks = 6
+        base_color = tuple(max(0, int(c * 0.8)) for c in self.color)
+        center_x = self.x + self.size // 2
+        center_y = self.y + self.size // 2
+        for i in range(n_chunks):
+            angle = 2 * math.pi * i / n_chunks + random.uniform(-0.2, 0.2)
+            speed = random.uniform(5, 11)
+            chunk_size = self.size // 3
+            chunk_x = center_x - chunk_size // 2
+            chunk_y = center_y - chunk_size // 2
+            dx = math.cos(angle) * speed
+            dy = math.sin(angle) * speed
+            self.death_chunks.append({
+                'x': chunk_x,
+                'y': chunk_y,
+                'dx': dx,
+                'dy': dy,
+                'size': chunk_size,
+                'color': base_color,
+                'alpha': 255,
+                'timer': 0.0
+            })
+        # Trigger game over screen
+        if hasattr(self, 'engine') and hasattr(self.engine, 'show_game_over_screen'):
+            self.engine.show_game_over_screen()
+        else:
+            print("Game Over!")
+
+    def update_death_animation(self, dt):
+        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer'):
+            self.death_timer += dt
+            if hasattr(self, 'death_chunks'):
+                for chunk in self.death_chunks:
+                    chunk['x'] += chunk['dx'] * dt * 60
+                    chunk['y'] += chunk['dy'] * dt * 60
+                    chunk['timer'] += dt
+                    # Fade out
+                    chunk['alpha'] = max(0, 255 - int((chunk['timer'] / self.death_duration) * 255))
+            if self.death_timer >= self.death_duration:
+                self.death_timer = self.death_duration
+                # Optionally, remove player or freeze input
+
+    def draw_death_animation(self, surface, camera_x=0, camera_y=0):
+        if getattr(self, 'is_dead', False) and hasattr(self, 'death_timer') and hasattr(self, 'death_chunks'):
+            for chunk in self.death_chunks:
+                cache_key = (chunk['size'], tuple(chunk['color']), chunk['alpha'])
+                if cache_key not in Player._death_chunk_surface_cache:
+                    chunk_surf = pygame.Surface((chunk['size'], chunk['size']), pygame.SRCALPHA)
+                    pygame.draw.rect(chunk_surf, (*chunk['color'], chunk['alpha']), (0, 0, chunk['size'], chunk['size']))
+                    Player._death_chunk_surface_cache[cache_key] = chunk_surf
+                else:
+                    chunk_surf = Player._death_chunk_surface_cache[cache_key]
+                draw_x = int(chunk['x'] - camera_x)
+                draw_y = int(chunk['y'] - camera_y)
+                surface.blit(chunk_surf, (draw_x, draw_y))
+            return True
+        return False
+    def apply_effects_to_all_weapons(self):
+        """
+        Apply all stored powerup effect types to every weapon in the player's inventory.
+        Ensures no duplicate effect types are added.
+        """
+        if not hasattr(self, 'stored_powerup_effects'):
+            self.stored_powerup_effects = []
+        for weapon in self.weapons:
+            if weapon is not None:
+                print(f"[DEBUG][Player] Weapon {weapon} has effects: {weapon.effects}")
+                print(f"[DEBUG][Player] Checking stored effect types {self.stored_powerup_effects}")
+                for effect_type in self.stored_powerup_effects:
+                    # Only add if not already present by type
+                    if not any(isinstance(e, effect_type) for e in weapon.effects):
+                        # Create new effect instance
+                        if effect_type.__name__ == 'PoisonEffect':
+                            effect_instance = effect_type(
+                                damage_per_tick=2,
+                                tick_interval=1.0,
+                                duration=3.0,
+                                level=self.get_powerup_tier('Poison') if hasattr(self, 'get_powerup_tier') else 1
+                            )
+                        else:
+                            effect_instance = effect_type()
+                        weapon.effects.append(effect_instance)
+                        print(f"[DEBUG][Player] Applied stored effect {effect_instance} to weapon {weapon}")

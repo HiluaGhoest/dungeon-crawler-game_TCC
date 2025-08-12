@@ -1,4 +1,3 @@
-
 import random
 import pygame
 import time
@@ -14,6 +13,7 @@ class Weapon:
         self.sprite = None
         self.origin = (0, 0)
         self.last_attack_time = 0
+        self.effects = []  # List of active effects to apply on hit
 
         if sprite_path:
             from game.assets import get_image
@@ -23,10 +23,36 @@ class Weapon:
         current_time = time.time()
         return (current_time - self.last_attack_time) >= (1.0 / self.fire_rate)
 
-    def attack(self, player_pos, angle):
-        """Método genérico para atacar — deve ser implementado nas subclasses."""
+    def attack(self, player_pos, angle, target=None):
+        """Generic attack method. Subclasses should implement. Optionally apply effects to target."""
+        if target:
+            self.apply_effects(target)
         raise NotImplementedError
-    
+
+    def apply_effects(self, target):
+        """Applies weapon effects to target by creating new instances"""
+        print(f"[DEBUG][Weapon.apply_effects] Weapon: {self.name}, Effects: {self.effects}, Target: {target}")
+        for effect_template in getattr(self, 'effects', []):
+            print(f"[DEBUG][Weapon.apply_effects] Creating effect instance from template: {effect_template}")
+            effect_cls = effect_template if isinstance(effect_template, type) else type(effect_template)
+            # Use attributes from instance if available, else defaults
+            kwargs = {}
+            for attr in ['damage_per_tick', 'tick_interval', 'duration', 'level']:
+                val = getattr(effect_template, attr, None)
+                if val is not None:
+                    kwargs[attr] = val
+            try:
+                new_effect = effect_cls(**kwargs)
+            except Exception as e:
+                print(f"[DEBUG][Weapon.apply_effects] Error instantiating effect: {e}")
+                continue
+            print(f"[DEBUG][Weapon.apply_effects] New effect instance: {new_effect}")
+            new_effect.apply(target)
+            print(f"[DEBUG][Weapon.apply_effects] Applied {new_effect.__class__.__name__} to {target}")
+            if hasattr(target, 'effects'):
+                target.effects.append(new_effect)
+                print(f"[DEBUG][Weapon.apply_effects] Added {new_effect.__class__.__name__} to target.effects: {target.effects}")
+
     def render_static(self, surface, center, camera_x=0, camera_y=0, zoom=1.0, size=None):
         # Bobbing effect and shadow rendering for static weapons
         # Animate sprite if self.sprites exists (like in Steel_Sword)
@@ -77,7 +103,7 @@ class Weapon:
         pass
 
 class Projectile:
-    def __init__(self, x, y, angle, speed, damage):
+    def __init__(self, x, y, angle, speed, damage, weapon=None):
         self.pos = pygame.math.Vector2(x, y)
         self.angle = angle
         self.speed = speed
@@ -86,6 +112,7 @@ class Projectile:
         self.velocity = pygame.math.Vector2(math.cos(angle), math.sin(angle)) * speed
         self.rect = pygame.Rect(x - self.radius, y - self.radius, self.radius*2, self.radius*2)
         self.is_alive = True
+        self.weapon = weapon  # Reference to weapon for effect application
 
     def update(self, dt, enemies, wall_rects=None, room_rect=None):
         self.pos += self.velocity * dt
@@ -94,7 +121,13 @@ class Projectile:
         # Checar colisão com inimigos
         for enemy in enemies:
             if self.rect.colliderect(enemy.rect):
+                print(f"[DEBUG][Projectile.update] Projectile {self} hit Enemy {enemy}")
                 enemy.take_damage(self.damage)
+                if hasattr(self, 'weapon') and hasattr(self.weapon, 'apply_effects'):
+                    print(f"[DEBUG][Projectile.update] Applying weapon effects to Enemy {enemy}")
+                    self.weapon.apply_effects(enemy)
+                else:
+                    print(f"[DEBUG][Projectile.update] No weapon/effects to apply to Enemy {enemy}")
                 self.is_alive = False
                 return
 
@@ -102,11 +135,13 @@ class Projectile:
         if wall_rects:
             for wall in wall_rects:
                 if self.rect.colliderect(wall):
+                    print(f"[DEBUG][Projectile.update] Projectile {self} hit wall {wall}")
                     self.is_alive = False
                     return
 
         # Checar se saiu dos limites da sala
         if room_rect and not room_rect.colliderect(self.rect):
+            print(f"[DEBUG][Projectile.update] Projectile {self} left room bounds {room_rect}")
             self.is_alive = False
             return
 
@@ -119,10 +154,11 @@ class Projectile:
 
 # --- Bullet class for Pistol ---
 class Bullet(Projectile):
-    def __init__(self, x, y, angle, speed, damage):
+    def __init__(self, x, y, angle, speed, damage, weapon=None):
         super().__init__(x, y, angle, speed, damage)
         self.lifetime = 2.0  # 2 seconds
-        
+        self.weapon = weapon
+
     def render(self, surface, camera_x=0, camera_y=0, zoom=1.0):
         screen_x = (self.pos.x - camera_x) * (zoom - 0.3)
         screen_y = (self.pos.y - camera_y) * (zoom - 0.3)
@@ -133,12 +169,12 @@ class Bullet(Projectile):
         pygame.draw.circle(surface, (255, 255, 255), (int(screen_x), int(screen_y)), int(self.radius * zoom))
 
 class PistolBullet(Bullet):
-    def __init__(self, x, y, angle, speed, damage):
+    def __init__(self, x, y, angle, speed, damage, weapon=None):
         # Typical pistol bullet characteristics:
         # - Medium speed (faster than shotgun, slower than rifle)
         # - Moderate damage
         # - Small radius
-        super().__init__(x, y, angle, speed=speed, damage=damage)
+        super().__init__(x, y, angle, speed=speed, damage=damage, weapon=weapon)
         self.radius = 2  # Smaller visual radius than default bullet
         self.lifetime = 1.5  # Slightly shorter lifetime than default
         

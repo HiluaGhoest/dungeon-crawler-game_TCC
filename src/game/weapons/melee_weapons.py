@@ -6,6 +6,7 @@ import numpy as np
 import sys
 from game.weapons.weapon import Weapon
 from game.assets import load_audio
+from sound_manager import SoundManager
 
 class MeleeWeapon(Weapon):
     _woosh_sound = None
@@ -73,25 +74,46 @@ class MeleeWeapon(Weapon):
                 return
             # Ensure C-contiguous and int16
             arr2 = np.ascontiguousarray(arr2, dtype=np.int16)
-            print(f"[DEBUG] Resampled woosh array shape: {arr2.shape}, dtype: {arr2.dtype}, contiguous: {arr2.flags['C_CONTIGUOUS']}", file=sys.stderr)
             sound = pygame.sndarray.make_sound(arr2)
             sound.set_volume(volume)
-            print(f"[DEBUG] Playing woosh sound! speed={speed:.2f} volume={volume:.2f}", file=sys.stderr)
-            sound.play()
+            SoundManager.get_instance().play_sfx(sound)
         except Exception as e:
             print(f"[DEBUG] Woosh sound play failed: {e}", file=sys.stderr)
 
-    def attack(self, player_center, angle):
+    def attack(self, player_center, angle, enemies=None, attack_held=False):
         if not self.can_attack():
             return False
-        self.last_attack_time = time.time()
-        self.swing_start_time = time.time()
-        self.swing_phase = 1  # start swing forward
-        self._play_woosh(1)
-        print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
-        return True
+        if attack_held:
+            # Run full sword animation
+            self.last_attack_time = time.time()
+            self.swing_start_time = time.time()
+            self.swing_phase = 1  # start swing forward
+            self._play_woosh(1)
+            print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
+            self._pending_enemies = None
+            if enemies:
+                self._pending_enemies = [(enemy, player_center) for enemy in enemies]
+            return True
+        else:
+            # Quick attack: skip animation, just deal damage instantly
+            hit = False
+            attack_range = getattr(self, 'attack_range', 80)
+            damage = getattr(self, 'damage', 10)
+            arc_width = math.radians(70)
+            for enemy in enemies or []:
+                dx = enemy.x + enemy.size/2 - player_center[0]
+                dy = enemy.y + enemy.size/2 - player_center[1]
+                dist = math.hypot(dx, dy)
+                if dist <= attack_range:
+                    angle_to_enemy = math.atan2(dy, dx)
+                    diff = abs((angle_to_enemy - angle + math.pi) % (2*math.pi) - math.pi)
+                    if diff < arc_width/2:
+                        enemy.take_damage(damage)
+                        self.apply_effects(enemy)
+                        hit = True
+            return hit
 
-    def update(self, dt):
+    def update(self, dt, enemies=None, player_center=None):
         # Handle swing phase transitions
         if self.swing_phase != 0:
             elapsed = time.time() - self.swing_start_time
@@ -106,6 +128,29 @@ class MeleeWeapon(Weapon):
                     self._play_woosh(3)
                 else:
                     self.swing_phase = 0  # finished
+        # Apply damage/effects during phase 2
+        if self.swing_phase == 2 and enemies and player_center is not None:
+            arc_width = math.radians(70)
+            attack_angle = getattr(self, 'swing_angle', None)
+            if attack_angle is None:
+                attack_angle = 0
+            if not hasattr(self, '_already_hit_enemies') or self.swing_phase == 0:
+                self._already_hit_enemies = set()
+            for enemy in enemies:
+                dx = enemy.x + getattr(enemy, 'size', 0)/2 - player_center[0]
+                dy = enemy.y + getattr(enemy, 'size', 0)/2 - player_center[1]
+                dist = math.hypot(dx, dy)
+                if dist <= self.attack_range:
+                    angle_to_enemy = math.atan2(dy, dx)
+                    diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
+                    if diff < arc_width/2:
+                        if enemy not in self._already_hit_enemies:
+                            if hasattr(enemy, 'take_damage'):
+                                enemy.take_damage(self.damage)
+                            self.apply_effects(enemy)
+                            self._already_hit_enemies.add(enemy)
+            if self.swing_phase == 0 and hasattr(self, '_already_hit_enemies'):
+                self._already_hit_enemies.clear()
 
     def render(self, surface, player_center, angle, camera_x=0, camera_y=0, zoom=1.0):
         # Calculate base sprite and scaling
@@ -221,20 +266,44 @@ class SteelSword(MeleeWeapon):
         self.last_tip_pos = None
         self.swing_angle = None  # ângulo congelado do swing
 
-    def attack(self, player_center, angle):
+        self.effects = []  # List to hold active effects
+    def attack(self, player_center, angle, enemies=None, attack_held=False):
         if not self.can_attack():
             return False
-        self.last_attack_time = time.time()
-        self.is_swinging = True
-        self.swing_start_time = time.time()
-        self.swing_phase = 1  # start swing forward
-        self.swing_angle = angle  # salva o ângulo do swing
-        self._play_woosh(1)
-        print(f"Swinging {self.name} at angle {math.degrees(angle):.1f} degrees!")
-        return True
+        if attack_held:
+            # Clear already hit enemies for a new swing
+            self._already_hit_enemies = set()
+            self.last_attack_time = time.time()
+            self.is_swinging = True
+            self.swing_start_time = time.time()
+            self.swing_phase = 1  # start swing forward
+            self.swing_angle = angle  # salva o ângulo do swing
+            self._play_woosh(1)
+            self._pending_enemies = None
+            if enemies:
+                self._pending_enemies = [(enemy, player_center) for enemy in enemies]
+            return True
+        else:
+            # Quick attack: skip animation, just deal damage instantly
+            hit = False
+            arc_width = math.radians(70)
+            attack_angle = angle
+            for enemy in enemies or []:
+                dx = enemy.x + getattr(enemy, 'size', 0)/2 - player_center[0]
+                dy = enemy.y + getattr(enemy, 'size', 0)/2 - player_center[1]
+                dist = math.hypot(dx, dy)
+                if dist <= self.attack_range:
+                    angle_to_enemy = math.atan2(dy, dx)
+                    diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
+                    if diff < arc_width/2:
+                        if hasattr(enemy, 'take_damage'):
+                            enemy.take_damage(self.damage)
+                        self.apply_effects(enemy)
+                        hit = True
+            return hit
 
 
-    def update(self, dt):
+    def update(self, dt, enemies=None, player_center=None, attack_held=True):
         # Always update animation regardless of swinging state
         self.frame_timer += dt
         if self.frame_timer >= self.frame_duration:
@@ -246,71 +315,112 @@ class SteelSword(MeleeWeapon):
         # Handle swing phase transitions (copied from MeleeWeapon)
         if self.swing_phase != 0:
             elapsed = time.time() - self.swing_start_time
-
-            if self.swing_phase == 1:
-                if elapsed > self.swing_duration + phase1_hold_time:
-                    self.swing_phase = 2  # backward
-                    self.swing_start_time = time.time()
-                    self._play_woosh(2)
-
-            elif self.swing_phase == 2:
-                if elapsed > self.swing_duration:
-                    self.swing_phase = 3  # return
+            # If attack button released, smoothly transition to resting position
+            if not attack_held:
+                # If in phase 1 or 2, go to phase 3 (return) for smooth finish
+                if self.swing_phase in (1, 2):
+                    self.swing_phase = 3
                     self.swing_start_time = time.time()
                     self._play_woosh(3)
-
+                elif self.swing_phase == 3:
+                    if elapsed > self.swing_duration:
+                        self.swing_phase = 0
+                        self.is_swinging = False
+                        # Reset cooldown so player can attack again immediately
+                        self.last_attack_time = time.time() - self.swing_cooldown
             else:
-                if elapsed > self.swing_duration:
-                    self.swing_phase = 0  # finished
-                    self.is_swinging = False
+                if self.swing_phase == 1:
+                    if elapsed > self.swing_duration + phase1_hold_time:
+                        self.swing_phase = 2  # backward
+                        self.swing_start_time = time.time()
+                        self._play_woosh(2)
+                elif self.swing_phase == 2:
+                    if elapsed > self.swing_duration:
+                        self.swing_phase = 3  # return
+                        self.swing_start_time = time.time()
+                        self._play_woosh(3)
+                elif self.swing_phase == 3:
+                    if elapsed > self.swing_duration:
+                        self.swing_phase = 0  # finished
+                        self.is_swinging = False
 
+        # Apply damage/effects during phase 2
+        if self.swing_phase == 2 and enemies and player_center is not None:
+            arc_width = math.radians(70)
+            attack_angle = getattr(self, 'swing_angle', None)
+            if attack_angle is None:
+                attack_angle = 0
+            if not hasattr(self, '_already_hit_enemies') or self.swing_phase == 0:
+                self._already_hit_enemies = set()
+            for enemy in enemies:
+                dx = enemy.x + getattr(enemy, 'size', 0)/2 - player_center[0]
+                dy = enemy.y + getattr(enemy, 'size', 0)/2 - player_center[1]
+                dist = math.hypot(dx, dy)
+                if dist <= self.attack_range:
+                    angle_to_enemy = math.atan2(dy, dx)
+                    diff = abs((angle_to_enemy - attack_angle + math.pi) % (2*math.pi) - math.pi)
+                    if diff < arc_width/2:
+                        if enemy not in self._already_hit_enemies:
+                            if hasattr(enemy, 'take_damage'):
+                                enemy.take_damage(self.damage)
+                            self.apply_effects(enemy)
+                            self._already_hit_enemies.add(enemy)
+            if self.swing_phase == 0 and hasattr(self, '_already_hit_enemies'):
+                self._already_hit_enemies.clear()
         # Update trails
         for trail in self.trails:
             trail['time'] += dt
         self.trails = [t for t in self.trails if t['time'] < self.trail_lifetime]
 
 
+
+    def _get_trail_surface_pool(self, zoom):
+        # Preallocate a pool of trail surfaces by radius (few radii)
+        if not hasattr(self, '_trail_surface_pool') or self._trail_surface_pool_zoom != zoom:
+            min_radius = 1
+            max_radius = 3
+            radii = [int(min_radius + (max_radius - min_radius) * r * zoom) for r in np.linspace(0, 1, 4)]
+            pool = {}
+            for radius in set(radii):
+                surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+                pygame.draw.circle(surf, self.trail_color + (255,), (radius, radius), radius)
+                pool[radius] = surf
+            self._trail_surface_pool = pool
+            self._trail_surface_pool_zoom = zoom
+        return self._trail_surface_pool
+
     def render(self, surface, player_center, angle, camera_x=0, camera_y=0, zoom=1.0, dt=0.016):
-        # Use current frame for animation
+        # ...existing code...
+        now = time.time()
         sprite = self.sprites[self.current_frame]
         base_width = 64
         original_rect = sprite.get_rect()
         scale_width = int(base_width * zoom)
         scale_height = int(scale_width * original_rect.height / original_rect.width)
         scaled_sprite = pygame.transform.scale(sprite, (scale_width, scale_height))
-
-        # Calculate scaled origin
         origin_x = self.origin[0] * (scale_width / original_rect.width)
         origin_y = self.origin[1] * (scale_height / original_rect.height)
-
-        # Use swing_angle se estiver swingando
         use_angle = angle
         if self.swing_phase != 0 and self.swing_angle is not None:
             use_angle = self.swing_angle
-
         adjusted_angle = math.degrees(use_angle) + 90
         angle_rad = math.radians(math.degrees(use_angle))
         flip = math.cos(angle_rad) < 0
         if flip:
             scaled_sprite = pygame.transform.flip(scaled_sprite, True, False)
-
-        # Swing animation (reuse MeleeWeapon logic if needed)
         swing_offset = 0
-        elapsed = time.time() - self.swing_start_time
+        elapsed = now - self.swing_start_time
         t = min(elapsed / self.swing_duration, 1.0)
         def ease_out_back(t):
             c1 = 1.70158
             c3 = c1 + 1
             return 1 + c3 * (t - 1)**3 + c1 * (t - 1)**2
-        
         t_eased = ease_out_back(t)
         def lerp(a, b, t):
             return a + (b - a) * t
         def ease_out_expo(t):
             return 1 if t == 1 else 1 - pow(2, -10 * t)
-
         t_eased_expo = ease_out_expo(t)
-
         if hasattr(self, 'swing_phase') and self.swing_phase != 0:
             pre_swing_offset = 40
             swing_max_angle = getattr(self, 'swing_max_angle', 90)
@@ -331,32 +441,24 @@ class SteelSword(MeleeWeapon):
                 else:
                     swing_offset = lerp(-swing_max_angle, 0, t_eased)
             adjusted_angle += swing_offset
-
-        # --- Smooth interpolation for offsets (like Pistol/DoublePistol) ---
         if not hasattr(self, '_prev_horizontal_offset'):
             self._prev_horizontal_offset = 0
         if not hasattr(self, '_prev_lower_offset'):
             self._prev_lower_offset = 0
-
         target_horizontal_offset = -20 * zoom if math.cos(angle_rad) < 0 else 20 * zoom
         target_lower_offset = -10 * zoom if math.sin(angle_rad) < 0 else 10 * zoom
-
         interp_speed = 0.18
-        # Use time-based interpolation for smoothness
         dt_interp = 1 / 60
         if hasattr(self, 'last_interp_time'):
-            now = time.time()
             dt_interp = min(now - self.last_interp_time, 0.05)
             self.last_interp_time = now
         else:
-            self.last_interp_time = time.time()
-
+            self.last_interp_time = now
         lerp_factor = 1 - math.exp(-interp_speed * dt_interp * 60)
         horizontal_offset = lerp(self._prev_horizontal_offset, target_horizontal_offset, lerp_factor)
         lower_offset = lerp(self._prev_lower_offset, target_lower_offset, lerp_factor)
         self._prev_horizontal_offset = horizontal_offset
         self._prev_lower_offset = lower_offset
-
         rotated_sprite = pygame.transform.rotate(scaled_sprite, -adjusted_angle)
         rotated_rect = rotated_sprite.get_rect()
         image_center = pygame.math.Vector2(scale_width / 2, scale_height / 2)
@@ -366,36 +468,40 @@ class SteelSword(MeleeWeapon):
         blit_pos_world = pygame.math.Vector2(player_center) - pygame.math.Vector2(rotated_rect.width / 2, rotated_rect.height / 2) - offset_rotated
         draw_x = blit_pos_world.x - camera_x + horizontal_offset
         draw_y = blit_pos_world.y - camera_y + lower_offset
-
         # --- TRAIL EFFECT ---
         def lerp_color(color1, color2, t):
             return tuple(int(c1 + (c2 - c1) * t) for c1, c2 in zip(color1, color2))
-
         fire_colors = [
             (128, 0, 128),      # deep purple (base)
             (186, 85, 211),     # medium purple
             (221, 160, 221),    # lavender
             (255, 255, 255)     # bright white (core / tip)
         ]
-
         self.trail_timer += dt
         tip_length = random.uniform(-scale_height * 0.5, scale_height * 0.5)
         tip_offset = pygame.math.Vector2(0, -tip_length)
         tip_offset = tip_offset.rotate(adjusted_angle)
         tip_pos = pygame.math.Vector2(draw_x + scale_width/2, draw_y + scale_height/2) + tip_offset
-
         def smoothstep(t):
             return t * t * (3 - 2 * t)
-
         smoothing_factor = 0.1
+        # Limit trail spawn rate and total number of trail particles
+        max_trails = 40
+        trail_spawn_interval = 0.01
+        spawn_trail = False
+        if self.trail_timer >= trail_spawn_interval and len(self.trails) < max_trails:
+            spawn_trail = True
+            self.trail_timer = 0
         if self.last_tip_pos is not None:
             dist = (tip_pos - self.last_tip_pos).length()
             self.last_tip_pos = self.last_tip_pos.lerp(tip_pos, smoothing_factor)
-            if dist > 0:
+            if dist > 0 and spawn_trail:
                 min_steps = 8
                 max_steps = 24
                 steps = random.randint(min_steps, max_steps)
                 for i in range(1, steps+1):
+                    if len(self.trails) >= max_trails:
+                        break
                     interp_factor = smoothstep(i/steps)
                     interp = self.last_tip_pos.lerp(tip_pos, interp_factor)
                     tip_length = random.uniform(0, scale_height * 0.25)
@@ -403,7 +509,7 @@ class SteelSword(MeleeWeapon):
                     tip_offset = tip_offset.rotate(adjusted_angle)
                     trail_pos = interp + tip_offset
                     self.trails.append({'pos': trail_pos, 'time': 0, 'alpha': 255, 'interp': interp_factor, 'interp_pos': interp})
-        else:
+        elif spawn_trail:
             offset_spread = 5 * zoom
             rand_offset = pygame.math.Vector2(
                 random.uniform(-offset_spread, offset_spread),
@@ -416,7 +522,10 @@ class SteelSword(MeleeWeapon):
             trail_pos = tip_offset + rand_offset
             self.trails.append({'pos': trail_pos, 'time': 0, 'alpha': 255, 'interp': 1.0, 'interp_pos': interp})
             self.last_tip_pos = tip_pos
-
+        # Preallocate and reuse trail surfaces
+        pool = self._get_trail_surface_pool(zoom)
+        min_radius = min(pool.keys())
+        max_radius = max(pool.keys())
         for trail in self.trails:
             fade = 1.0 - (trail['time'] / self.trail_lifetime)
             fade = fade * fade
@@ -429,16 +538,18 @@ class SteelSword(MeleeWeapon):
             else:
                 t = fade / 0.5
                 color = lerp_color(fire_colors[0], fire_colors[1], t)
-
             alpha = int(255 * fade)
-            color = (*color, alpha)
-            min_radius = 1
-            max_radius = 3
-            radius = int(min_radius + (max_radius - min_radius) * fade * zoom)
-            color = (*self.trail_color, alpha)
-            trail_surface = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
-            pygame.draw.circle(trail_surface, color, (radius, radius), radius)
-
+            radius = int(min_radius + (max_radius - min_radius) * fade)
+            radius = min(max(min(pool.keys()), radius), max(pool.keys()))
+            trail_surface = pool[radius].copy()
+            arr = pygame.surfarray.pixels_alpha(trail_surface)
+            arr[:, :] = alpha
+            del arr
+            arr_rgb = pygame.surfarray.pixels3d(trail_surface)
+            arr_rgb[:, :, 0] = color[0]
+            arr_rgb[:, :, 1] = color[1]
+            arr_rgb[:, :, 2] = color[2]
+            del arr_rgb
             if 'interp' in trail and 0.2 < trail['interp'] < 0.8:
                 flicker_strength = max(1, int(self.sprite.get_height() / 10 * fade * zoom * 2))
                 offset_x = math.sin(trail['time'] * 10 + trail['pos'].x) * flicker_strength * random.uniform(0.3, 0.7)
@@ -449,9 +560,7 @@ class SteelSword(MeleeWeapon):
             else:
                 offset_x = 0
                 offset_y = 0
-
             surface.blit(trail_surface, (trail['pos'].x - radius + int(offset_x), trail['pos'].y - radius + int(offset_y)))
-
         surface.blit(rotated_sprite, (draw_x, draw_y))
 
     def render_static(self, surface, center, camera_x=0, camera_y=0, zoom=1):

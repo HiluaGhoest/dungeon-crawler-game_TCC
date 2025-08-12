@@ -28,13 +28,14 @@ def get_light_performance_mode():
 
 def create_light_mask(radius):
     """Create a radial gradient light mask with soft edges"""
+    radius = int(radius)
     size = radius * 2
     mask = pygame.Surface((size, size), pygame.SRCALPHA)
-    
+
     # Quality settings
-    steps = 30 if PERFORMANCE_MODE == "fast" else 40 if PERFORMANCE_MODE == "balanced" else 60
-    
-    for r in range(radius, 0, -max(1, radius//steps)):
+    steps = int(20 if PERFORMANCE_MODE == "fast" else 40 if PERFORMANCE_MODE == "balanced" else 60)
+    step_size = max(1, radius // steps)
+    for r in range(radius, 0, -step_size):
         # More gradual falloff to reduce hot spot
         normalized_r = r / radius
         fade = 1.0 - (normalized_r ** 1.5)  # Use power of 1.5 for smoother transition
@@ -87,7 +88,7 @@ def calculate_shadow_polygon(light_pos, wall, light_radius):
 def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), breathing_intensity=0.15, 
                            flicker_intensity=0.08, wall_rects=None, performance_mode=None):
     global _light_time
-    _light_time += 0.016  # ~60 FPS
+    _light_time += 0.066  # ~15 FPS
 
     if performance_mode is None:
         performance_mode = PERFORMANCE_MODE
@@ -100,16 +101,17 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     flicker_noise = (random.random() * 0.4 + 0.8)  # Less random variation
     flicker_offset = flicker_base * flicker_noise * flicker_intensity
 
-    # Optimize surface size: only as large as needed for visible area
-    # If wall_rects is present, find bounding box of all relevant walls and light
+    # Optimize surface size: use minimal bounding box (light_bbox) covering light and relevant walls, clamped to radius-based size
     if wall_rects and len(wall_rects) > 0:
-        min_x = min([w.x for w in wall_rects] + [px])
-        max_x = max([w.x + w.width for w in wall_rects] + [px])
-        min_y = min([w.y for w in wall_rects] + [py])
-        max_y = max([w.y + w.height for w in wall_rects] + [py])
-        width = max_x - min_x + 20
-        height = max_y - min_y + 20
-        light_size = max(width, height, (radius + 10) * 2)
+        min_x = min([w.x for w in wall_rects] + [px - radius])
+        max_x = max([w.x + w.width for w in wall_rects] + [px + radius])
+        min_y = min([w.y for w in wall_rects] + [py - radius])
+        max_y = max([w.y + w.height for w in wall_rects] + [py + radius])
+        width = max_x - min_x + 8
+        height = max_y - min_y + 8
+        # Clamp to max size based on radius
+        max_light_size = (radius + 10) * 2
+        light_size = min(max(width, height), max_light_size)
         offset_x = px - light_size // 2
         offset_y = py - light_size // 2
     else:
@@ -137,66 +139,79 @@ def render_volumetric_light(surface, px, py, radius=180, color=(255, 255, 180), 
     # Get cached base mask (grayscale)
     base_mask = get_cached_light_mask(effective_radius, performance_mode)
 
-    # Create a tinted version of the mask
-    tinted_mask = base_mask.copy()
-    color_surf = pygame.Surface(tinted_mask.get_size(), pygame.SRCALPHA)
-    color_surf.fill(adjusted_color)
-    tinted_mask.blit(color_surf, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    # Cache tinted mask by (radius, color, performance_mode, intensity_bucket)
+    # Use intensity_bucket to group similar intensities (reduce cache churn)
+    intensity_bucket = int(intensity_multiplier * 100)  # e.g. 60-140
+    tinted_key = (effective_radius, adjusted_color, performance_mode, intensity_bucket)
+    if tinted_key not in LIGHT_SURFACE_CACHE:
+        tinted_mask = base_mask.copy()
+        color_surf = pygame.Surface(tinted_mask.get_size(), pygame.SRCALPHA)
+        color_surf.fill(adjusted_color)
+        tinted_mask.blit(color_surf, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        LIGHT_SURFACE_CACHE[tinted_key] = tinted_mask
+    else:
+        tinted_mask = LIGHT_SURFACE_CACHE[tinted_key]
     # ====== END CACHED SECTION ======
 
     # Draw the base light
     light_surface.blit(tinted_mask, (0, 0))
 
-    # Add rays for volumetric effect (more subtle)
+    # Add rays for volumetric effect (cache per radius/perf_mode/color)
     if performance_mode != "fast":
-        rays = 1 if performance_mode == "balanced" else 1  # Reduced ray count
-        ray_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
-        for i in range(rays):
-            angle = 2 * math.pi * i / rays + random.uniform(-0.1, 0.1)
-            length = effective_radius * (0.6 + 0.3 * random.random())
-            end_x = effective_radius + length * math.cos(angle)
-            end_y = effective_radius + length * math.sin(angle)
-            alpha = int((15 if performance_mode == "balanced" else 25) * intensity_multiplier)
-            ray_color = (
-                int(adjusted_color[0] * 0.7),
-                int(adjusted_color[1] * 0.7),
-                int(adjusted_color[2] * 0.7),
-                max(5, alpha)
-            )
-            pygame.draw.line(
-                ray_surface,
-                ray_color,
-                (effective_radius, effective_radius),
-                (end_x, end_y),
-                1
-            )
-        # Save rays only surface for masking
+        ray_key = (effective_radius, performance_mode, adjusted_color)
+        if ray_key not in LIGHT_SURFACE_CACHE:
+            rays = 8 if performance_mode == "balanced" else 16  # More rays for quality
+            ray_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
+            for i in range(rays):
+                # Deterministic pattern: evenly spaced angles, fixed length with slight sinusoidal mod
+                angle = 2 * math.pi * i / rays
+                length_mod = 0.75 + 0.15 * math.sin(i * 2.1)
+                length = effective_radius * length_mod
+                end_x = effective_radius + length * math.cos(angle)
+                end_y = effective_radius + length * math.sin(angle)
+                alpha = int((15 if performance_mode == "balanced" else 25) * intensity_multiplier)
+                ray_color = (
+                    int(adjusted_color[0] * 0.7),
+                    int(adjusted_color[1] * 0.7),
+                    int(adjusted_color[2] * 0.7),
+                    max(5, alpha)
+                )
+                pygame.draw.line(
+                    ray_surface,
+                    ray_color,
+                    (effective_radius, effective_radius),
+                    (end_x, end_y),
+                    1
+                )
+            LIGHT_SURFACE_CACHE[ray_key] = ray_surface.copy()
+        ray_surface = LIGHT_SURFACE_CACHE[ray_key]
         rays_only_surface = ray_surface.copy()
         # Use normal blending instead of additive for subtler effect
         light_surface.blit(ray_surface, (0, 0), special_flags=pygame.BLEND_ALPHA_SDL2)
 
     # No storing in cache for full light surface
     
-    # Handle wall shadows with optimization for large numbers of walls
+    # Handle wall shadows with early culling and optimization
     if wall_rects:
-        # Limit the number of walls processed for shadows to improve performance
-        max_walls_for_shadows = 50 if performance_mode == "fast" else 100 if performance_mode == "balanced" else 200
-        
-        # Sort walls by distance from light and only process the closest ones
-        if len(wall_rects) > max_walls_for_shadows:
-            walls_with_distance = []
-            for wall in wall_rects:
-                # Calculate approximate distance from light to wall center (using squared distance to avoid sqrt)
-                wall_center_x = wall.x + wall.width // 2
-                wall_center_y = wall.y + wall.height // 2
-                dist_sq = (wall_center_x - px) ** 2 + (wall_center_y - py) ** 2
-                walls_with_distance.append((dist_sq, wall))
-            
-            # Sort by distance and take only the closest walls
-            walls_with_distance.sort(key=lambda x: x[0])
-            processed_walls = [wall for _, wall in walls_with_distance[:max_walls_for_shadows]]
-        else:
-            processed_walls = wall_rects
+        # Early cull: only process walls intersecting an expanded light bounding box
+        # Expand bounding box by 1.5x radius for breathing/flicker and shadow reach
+        bbox_radius = int(effective_radius * 1.5)
+        light_bbox = pygame.Rect(px - bbox_radius, py - bbox_radius, bbox_radius * 2, bbox_radius * 2)
+
+        culled_walls = [w for w in wall_rects if w.colliderect(light_bbox)]
+
+        # Cap number of walls based on performance mode
+        max_walls = 8 if performance_mode == "fast" else 24 if performance_mode == "balanced" else 60
+
+        # Sort by distance to light center
+        walls_with_distance = []
+        for wall in culled_walls:
+            wall_center_x = wall.x + wall.width // 2
+            wall_center_y = wall.y + wall.height // 2
+            dist_sq = (wall_center_x - px) ** 2 + (wall_center_y - py) ** 2
+            walls_with_distance.append((dist_sq, wall))
+        walls_with_distance.sort(key=lambda x: x[0])
+        processed_walls = [wall for _, wall in walls_with_distance[:max_walls]]
         
         shadow_surface = pygame.Surface((light_size, light_size), pygame.SRCALPHA)
         shadow_surface.fill((0, 0, 0, 0))

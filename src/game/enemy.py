@@ -2,11 +2,16 @@ import random
 import pygame
 import math
 import time
+
+from sound_manager import SoundManager
 from . import assets
 
 class Enemy:
     # Preload death sound as a class variable
     death_sound = assets.load_audio('game/sounds/effects/slime_death.wav')
+    hit_sound = assets.load_audio('game/sounds/effects/enemy_hit.wav')
+    # Throttle AI checks
+    _ai_throttle_interval = 0.1  # seconds
 
     def __init__(self, x, y, health=10, size=24, color=(255, 0, 60)):
         self.x = x
@@ -49,7 +54,11 @@ class Enemy:
         self.spawn_duration = random.uniform(0.5, 4.0)
         self.removed = False
 
-        self.damage = 5
+        self.damage = 10
+        self._ai_timer = 0.0
+        self._ai_cached = None
+
+        self.effects = []  # List of status effects (e.g., poison)
 
     def _get_rect(self):
         return pygame.Rect(self.x, self.y, self.size, self.size)
@@ -59,6 +68,9 @@ class Enemy:
         if getattr(self, 'is_dead', False) or getattr(self, 'spawning', False):
             return
         self.health -= amount
+        # Play hit sound effect
+        if Enemy.hit_sound:
+            SoundManager.get_instance().play_sfx(Enemy.hit_sound)
         # Add floating damage number
         self.floating_damage.append({
             'damage': amount,
@@ -92,10 +104,14 @@ class Enemy:
         if self.health <= 0:
             self.die()
 
+    def add_effect(self, effect):
+        self.effects.append(effect)
+        effect.apply(self)
+
     def die(self):
         # Play death sound effect
         if Enemy.death_sound:
-            Enemy.death_sound.play()
+            SoundManager.get_instance().play_sfx(Enemy.death_sound)
         # Pixel Explosion Death Animation
         self.is_dead = True
         self.death_timer = 0.0
@@ -126,6 +142,20 @@ class Enemy:
             })
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
+        # --- Process status effects ---
+        # Process status effects
+        for effect in self.effects[:]:
+            effect.update(self)
+            if effect.is_expired():
+                self.effects.remove(effect)
+        # Throttle heavy AI checks
+        self._ai_timer += dt
+        run_ai = False
+        if self._ai_timer >= Enemy._ai_throttle_interval:
+            self._ai_timer = 0.0
+            run_ai = True
+        engine = getattr(self, 'engine', None)
+
         if player and hasattr(player, 'engine') and player.engine.is_paused:
             return
         # Death animation: pixel explosion
@@ -148,7 +178,6 @@ class Enemy:
                 if room and hasattr(room, 'enemies') and self in room.enemies:
                     room.enemies.remove(self)
                 else:
-                    engine = getattr(self, 'engine', None)
                     if engine and hasattr(engine, 'enemies') and self in engine.enemies:
                         engine.enemies.remove(self)
             return
@@ -199,101 +228,120 @@ class Enemy:
             self.blink_timer = 0.0
 
         # IA: Persegue o jogador se player_pos for fornecido
+        px, py = None, None
         if player_pos is not None:
             px, py = player_pos
-            dx = px - self.x
-            dy = py - self.y
-            dist = math.hypot(dx, dy)
-            # Apply group offset to target position
-            if dist > 0 and group_angle_offset != 0.0:
-                angle_to_player = math.atan2(dy, dx)
-                offset_angle_rad = math.radians(group_angle_offset)
-                flank_dist = min(64, dist * 0.5)  # how far to flank from player
-                flank_x = px + math.cos(angle_to_player + offset_angle_rad) * flank_dist
-                flank_y = py + math.sin(angle_to_player + offset_angle_rad) * flank_dist
-                dx = flank_x - self.x
-                dy = flank_y - self.y
-                dist = math.hypot(dx, dy)
+            if run_ai or self._ai_cached is None:
+                dx = px - self.x
+                dy = py - self.y
+                dist_sq = dx * dx + dy * dy
+                dist = dist_sq ** 0.5
+                # Apply group offset to target position
+                if dist > 0 and group_angle_offset != 0.0:
+                    angle_to_player = math.atan2(dy, dx)
+                    offset_angle_rad = math.radians(group_angle_offset)
+                    flank_dist = min(64, dist * 0.5)  # how far to flank from player
+                    flank_x = px + math.cos(angle_to_player + offset_angle_rad) * flank_dist
+                    flank_y = py + math.sin(angle_to_player + offset_angle_rad) * flank_dist
+                    dx = flank_x - self.x
+                    dy = flank_y - self.y
+                    dist_sq = dx * dx + dy * dy
+                    dist = dist_sq ** 0.5
 
-            # 1) Vetor de separação
-            sep_x = sep_y = 0.0
-            sep_radius = self.size
-            if other_enemies:
-                for other in other_enemies:
-                    if other is self: continue
-                    ox, oy = other.x, other.y
-                    dx_sep = self.x - ox
-                    dy_sep = self.y - oy
-                    d = math.hypot(dx_sep, dy_sep)
-                    if 0 < d < sep_radius:
-                        # força inversamente proporcional à distância
-                        strength = (sep_radius - d) / sep_radius
-                        sep_x += (dx_sep / d) * strength
-                        sep_y += (dy_sep / d) * strength
+                # 1) Vetor de separação
+                sep_x = sep_y = 0.0
+                sep_radius = self.size
+                if other_enemies:
+                    for other in other_enemies:
+                        if other is self: continue
+                        ox, oy = other.x, other.y
+                        dx_sep = self.x - ox
+                        dy_sep = self.y - oy
+                        d_sq = dx_sep * dx_sep + dy_sep * dy_sep
+                        if d_sq > 0 and d_sq < sep_radius * sep_radius:
+                            d = d_sq ** 0.5
+                            strength = (sep_radius - d) / sep_radius
+                            sep_x += (dx_sep / d) * strength
+                            sep_y += (dy_sep / d) * strength
 
-            # 2) Vetor desejado ao jogador
-            if dist > 2:
-                to_player_x = dx / dist
-                to_player_y = dy / dist
+                # 2) Vetor desejado ao jogador
+                if dist > 2:
+                    to_player_x = dx / dist
+                    to_player_y = dy / dist
+                else:
+                    to_player_x = to_player_y = 0
+
+                # 3) Combine e normalize
+                separation_weight = 20
+                desired_x = to_player_x + sep_x * separation_weight * 0.01
+                desired_y = to_player_y + sep_y * separation_weight * 0.01
+                d_desired_sq = desired_x * desired_x + desired_y * desired_y
+                if d_desired_sq > 0:
+                    d_desired = d_desired_sq ** 0.5
+                    desired_x /= d_desired
+                    desired_y /= d_desired
+
+                self._ai_cached = (desired_x, desired_y)
             else:
-                to_player_x = to_player_y = 0
-
-            # 3) Combine e normalize
-            separation_weight = 20
-            desired_x = to_player_x + sep_x * separation_weight * 0.01
-            desired_y = to_player_y + sep_y * separation_weight * 0.01
-            d_desired = math.hypot(desired_x, desired_y)
-            if d_desired > 0:
-                desired_x /= d_desired
-                desired_y /= d_desired
+                desired_x, desired_y = self._ai_cached
 
             # 4) Steering: ajuste suave da velocidade atual em direção ao desejado
             self.vx += (desired_x * self.speed - self.vx) * self.steer_strength
             self.vy += (desired_y * self.speed - self.vy) * self.steer_strength
 
             # 5) Atualiza posição
+            # Unified movement and collision block
             new_x = self.x + self.vx * dt * 60
             new_y = self.y + self.vy * dt * 60
             new_rect = pygame.Rect(new_x, new_y, self.size, self.size)
-            # Salva a posição futura para checagem global
             self.next_pos = (new_x, new_y)
-            # Checa colisão com outros inimigos (usando as posições futuras já salvas)
             can_move = True
-            # Só verifica colisão com inimigos próximos (raio de 1.5x tamanho)
+            min_dist = self.size * 1.5
+            # Prefilter other_enemies to only those within a reasonable range
+            nearby_enemies = []
             if other_enemies:
-                min_dist = self.size * 1.5
                 for other in other_enemies:
                     if other is self:
                         continue
                     other_future_x, other_future_y = getattr(other, 'next_pos', (other.x, other.y))
-                    dist_to_other = math.hypot(new_x - other_future_x, new_y - other_future_y)
-                    if dist_to_other < min_dist:
-                        other_rect = pygame.Rect(other_future_x, other_future_y, other.size, other.size)
-                        if new_rect.colliderect(other_rect):
-                            can_move = False
-                            break
-            # Checa colisão com jogador
+                    dx = new_x - other_future_x
+                    dy = new_y - other_future_y
+                    dist_sq = dx * dx + dy * dy
+                    if dist_sq < (min_dist * min_dist) * 4:  # Prefilter: 2x min_dist
+                        nearby_enemies.append((other, other_future_x, other_future_y))
+            # Now do detailed checks only for nearby enemies
+            for other, other_future_x, other_future_y in nearby_enemies:
+                other_rect = pygame.Rect(other_future_x, other_future_y, other.size, other.size)
+                if new_rect.colliderect(other_rect):
+                    can_move = False
+                    break
+            # Check collision with player
             player_rect = pygame.Rect(px, py, self.size, self.size)
             if new_rect.colliderect(player_rect):
                 can_move = False
-                if player is not None:
-                    # Enemy deals damage to player on collision
-                    if hasattr(player, 'take_damage'):
-                        player.take_damage(self.damage)  # You can adjust damage value as needed
-            # Só move se não houver colisão
+                if player is not None and hasattr(player, 'take_damage'):
+                    player.take_damage(self.damage)
+            # Check collision with walls
+            wall_rects = []
+            if engine:
+                current_room = engine.dungeon.get_current_room()
+                wall_rects = current_room.get_wall_rects() if hasattr(current_room, 'get_wall_rects') else []
+            if wall_rects:
+                for wall in wall_rects:
+                    if new_rect.colliderect(wall):
+                        can_move = False
+                        break
+            # Move if no collision
             if can_move:
                 self.x = new_x
                 self.y = new_y
                 self.rect.topleft = (self.x, self.y)
-            # Limpa a posição futura após o movimento
             if hasattr(self, 'next_pos'):
                 del self.next_pos
             # If blocked, try to slide around obstacle (perpendicular movement)
             if not can_move:
-                # Calculate perpendicular direction to player
-                perp_x = -to_player_y
-                perp_y = to_player_x
-                # Try both perpendicular directions
+                perp_x = -desired_y
+                perp_y = desired_x
                 slide_attempts = [
                     (self.x + perp_x * self.speed * dt * 60, self.y + perp_y * self.speed * dt * 60),
                     (self.x - perp_x * self.speed * dt * 60, self.y - perp_y * self.speed * dt * 60)
@@ -301,6 +349,7 @@ class Enemy:
                 for sx, sy in slide_attempts:
                     slide_rect = pygame.Rect(sx, sy, self.size, self.size)
                     blocked = False
+                    # Check collision with other enemies
                     if other_enemies:
                         for other in other_enemies:
                             if other is self:
@@ -310,11 +359,17 @@ class Enemy:
                             if slide_rect.colliderect(other_rect):
                                 blocked = True
                                 break
+                    # Check collision with player
                     if slide_rect.colliderect(player_rect):
                         blocked = True
-                        if player is not None:
-                            if hasattr(player, 'take_damage'):
-                                player.take_damage(1)
+                        if player is not None and hasattr(player, 'take_damage'):
+                            player.take_damage(1)
+                    # Check collision with walls
+                    if wall_rects:
+                        for wall in wall_rects:
+                            if slide_rect.colliderect(wall):
+                                blocked = True
+                                break
                     if not blocked:
                         self.x = sx
                         self.y = sy
@@ -335,6 +390,27 @@ class Enemy:
             self._last_footprint_pos = (self.x, self.y)
             self._footprint_side = "right" if self._footprint_side == "left" else "left"
 
+    # Surface caches for reuse
+    _chunk_surface_cache = {}
+    _damage_surface_cache = {}
+    _footprint_surface_cache = {}
+
+    def _get_chunk_surface(self, size):
+        if size not in Enemy._chunk_surface_cache:
+            Enemy._chunk_surface_cache[size] = pygame.Surface((size, size), pygame.SRCALPHA)
+        return Enemy._chunk_surface_cache[size].copy()
+
+    def _get_damage_surface(self, size):
+        if size not in Enemy._damage_surface_cache:
+            Enemy._damage_surface_cache[size] = pygame.Surface(size, pygame.SRCALPHA)
+        return Enemy._damage_surface_cache[size].copy()
+
+    def _get_footprint_surface(self, radius):
+        key = radius
+        if key not in Enemy._footprint_surface_cache:
+            Enemy._footprint_surface_cache[key] = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        return Enemy._footprint_surface_cache[key].copy()
+
     def draw(self, surface, camera_x=0, camera_y=0, zoom=1.0):
         if getattr(self, 'removed', False):
             return
@@ -348,13 +424,14 @@ class Enemy:
                 pygame.draw.rect(surface, (255, 255, 255, 255), enemy_rect, border_radius=6)
             else:
                 for chunk in self.death_chunks:
-                    chunk_surf = pygame.Surface((chunk['size'], chunk['size']), pygame.SRCALPHA)
+                    chunk_surf = self._get_chunk_surface(chunk['size'])
+                    chunk_surf.fill((0,0,0,0))  # Clear
                     pygame.draw.rect(chunk_surf, (*chunk['color'], chunk['alpha']), (0, 0, chunk['size'], chunk['size']))
                     draw_x = int(chunk['x'] - camera_x)
                     draw_y = int(chunk['y'] - camera_y)
                     surface.blit(chunk_surf, (draw_x, draw_y))
             # Render floating damage numbers mesmo durante a morte
-            font = pygame.font.SysFont('arial', 18, bold=True)
+            font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
             damage_lifetime = 0.7
             damage_rise = 30
             now = time.time()
@@ -366,14 +443,14 @@ class Enemy:
                 alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
                 offset = int((elapsed / damage_lifetime) * damage_rise)
                 dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
-                dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
+                dmg_surf = self._get_damage_surface(dmg_text.get_size())
+                dmg_surf.fill((0,0,0,0))
                 dmg_surf.blit(dmg_text, (0, 0))
                 dmg_surf.set_alpha(alpha)
                 draw_x = int(dmg['x'] - camera_x - dmg_text.get_width() // 2)
                 draw_y = int(dmg['y'] - camera_y - 20 - offset)
                 surface.blit(dmg_surf, (draw_x, draw_y))
             return
-        # ...restante do draw original...
         # --- Render blood splatters ---
         for splat in self.blood_splatters:
             alpha = max(0, 180 - int((splat['timer'] / splat['duration']) * 180))
@@ -389,7 +466,8 @@ class Enemy:
         self.footprints = [fp for fp in self.footprints if now - fp[2] < fade_time]
         for fp_x, fp_y, fp_time, fp_side in self.footprints[-max_footprints:]:
             alpha = max(0, 255 - int((now - fp_time) / fade_time * 255))
-            footprint_surf = pygame.Surface((footprint_radius*2, footprint_radius*2), pygame.SRCALPHA)
+            footprint_surf = self._get_footprint_surface(footprint_radius)
+            footprint_surf.fill((0,0,0,0))
             pygame.draw.ellipse(
                 footprint_surf,
                 (*footprint_color, alpha),
@@ -400,7 +478,7 @@ class Enemy:
             surface.blit(footprint_surf, (fp_x - footprint_radius - camera_x, fp_y - footprint_radius - camera_y))
 
         # --- Render floating damage numbers ---
-        font = pygame.font.SysFont('arial', 18, bold=True)
+        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
         damage_lifetime = 0.7  # seconds
         damage_rise = 30  # pixels
         for dmg in self.floating_damage[:]:
@@ -412,7 +490,8 @@ class Enemy:
             alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
             offset = int((elapsed / damage_lifetime) * damage_rise)
             dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
-            dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
+            dmg_surf = self._get_damage_surface(dmg_text.get_size())
+            dmg_surf.fill((0,0,0,0))
             dmg_surf.blit(dmg_text, (0, 0))
             dmg_surf.set_alpha(alpha)
             draw_x = int(dmg['x'] - camera_x - dmg_text.get_width() // 2)
@@ -440,7 +519,8 @@ class Enemy:
         new_x = base_x - new_width / 2
         enemy_rect = pygame.Rect(new_x, new_y, new_width, new_height)
         # Contorno rosa avermelhado
-        outline_color = (255, 100, 180)
+        outline_color = (255, 100, 180)  # cor do contorno
+        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
         outline_alpha = death_alpha
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, border_radius=6)
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, width=4, border_radius=6)
@@ -468,7 +548,7 @@ class Enemy:
 
 
 class VoidWrath(Enemy):
-    def __init__(self, x, y, health=12, size=24, color=(80, 0, 120)):
+    def __init__(self, x, y, health=20, size=24, color=(80, 0, 120)):
         super().__init__(x, y, health=health, size=size, color=color)
         self.state = 'waiting'  # waiting, windup, fading_out, dashing, fading_in, confused
         self.timer = 0.0
@@ -493,13 +573,15 @@ class VoidWrath(Enemy):
         self.windup_eyes_glow = False
         self.dash_trail = []  # List of (x, y, timestamp)
 
-        self.damage = 10
+        self.damage = 25
 
         # Preload dizzy sound effect
         self.dizzy_sound = assets.load_audio('game/sounds/effects/void_wrath_dizzing.wav')
         # Preload telegraphy sound effect
         self.telegraphy_sound = assets.load_audio('game/sounds/effects/telegraphy_void_wrath.wav')
         self.telegraphy_sound.set_volume(0.3)  # Set volume to 50%
+
+        self.effects = []
 
     def take_damage(self, amount, hit_direction=None):
         # Ignore damage if spawning
@@ -514,11 +596,20 @@ class VoidWrath(Enemy):
             self.vx += hit_direction[0] * knockback_strength
             self.vy += hit_direction[1] * knockback_strength
 
+
+    def add_effect(self, effect):
+        self.effects.append(effect)
+        effect.apply(self)
+
     def die(self):
         # Use Enemy's die method to play sound and handle animation
         super().die()
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
+        for effect in self.effects[:]:
+            effect.update(self)
+            if effect.is_expired():
+                self.effects.remove(effect)
         if player and hasattr(player, 'engine') and player.engine.is_paused:
             return
         # Death animation: pixel explosion
@@ -560,7 +651,7 @@ class VoidWrath(Enemy):
                 self.target_pos = player_pos
                 # Play telegraphy sound effect when telegraphy indicator appears
                 if self.telegraphy_sound:
-                    self.telegraphy_sound.play()
+                    SoundManager.get_instance().play_sfx(self.telegraphy_sound)
         elif self.state == 'windup':
             t = min(self.timer / self.windup_duration, 1.0)
             self.windup_eyes_glow = True
@@ -648,7 +739,7 @@ class VoidWrath(Enemy):
                     self.confused_timer = 0.0
                     # Play dizzy sound effect
                     if self.dizzy_sound:
-                        self.dizzy_sound.play()
+                        SoundManager.get_instance().play_sfx(self.dizzy_sound)
                 else:
                     self.state = 'fading_in'
                 self.timer = 0.0
@@ -711,7 +802,7 @@ class VoidWrath(Enemy):
                     draw_y = int(chunk['y'] - camera_y)
                     surface.blit(chunk_surf, (draw_x, draw_y))
             # Render floating damage numbers mesmo durante a morte
-            font = pygame.font.SysFont('arial', 18, bold=True)
+            font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
             damage_lifetime = 0.7
             damage_rise = 30
             now = time.time()
@@ -742,7 +833,7 @@ class VoidWrath(Enemy):
             pygame.draw.ellipse(trail_surf, (*trail_color, alpha), (0, 0, trail_radius*2, trail_radius*2))
             surface.blit(trail_surf, (int(tx - trail_radius - camera_x), int(ty - trail_radius - camera_y)) )
         # --- Render floating damage numbers ---
-        font = pygame.font.SysFont('arial', 18, bold=True)
+        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
         damage_lifetime = 0.7
         damage_rise = 30
         now = time.time()

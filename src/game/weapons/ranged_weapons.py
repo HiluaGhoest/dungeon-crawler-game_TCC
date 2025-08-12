@@ -2,6 +2,7 @@ import pygame
 import math
 import time
 from game.weapons.weapon import PistolBullet, Projectile, Weapon
+from sound_manager import SoundManager
 
 class RangedWeapon(Weapon):
     def __init__(self, name, sprite_path=None, color=(100, 200, 100), damage=8, fire_rate=0.8, projectile_speed=400):
@@ -23,15 +24,17 @@ class RangedWeapon(Weapon):
             y=player_pos[1],
             angle=angle,
             speed=self.projectile_speed,
-            damage=self.damage
+            damage=self.damage,
+            weapon=self
         )
         projectiles.append(proj)
+        # Effects will be applied on projectile hit (handled elsewhere)
         return True
     
     def render_static(self, surface, center, camera_x=0, camera_y=0, zoom=1):
         return super().render_static(surface, center, camera_x, camera_y, zoom)
     
-    def update_static(self, dt):
+    def update_static(self, dt, **kwargs):
         """Update logic for static weapons (e.g., those displayed on pillars). Override in subclasses if needed."""
         pass
 
@@ -112,6 +115,12 @@ class Pistol(RangedWeapon):
         if projectiles is None:
             print("Warning: No projectiles list provided to Pistol.attack()")
             return False
+        # Play gunfire sound
+        from game.assets import load_audio
+        gunfire_sound = load_audio("game/sounds/effects/gunfire.mp3")
+        gunfire_sound.set_volume(0.5)  # Set volume (0.0 to 1.0)
+        if gunfire_sound:
+            SoundManager.get_instance().play_sfx(gunfire_sound)
 
         # Use the current interpolated offsets for perfect alignment with render
         if not hasattr(self, '_prev_horizontal_offset'):
@@ -150,15 +159,17 @@ class Pistol(RangedWeapon):
             y=muzzle_world_y,
             angle=angle,
             speed=self.projectile_speed,
-            damage=self.damage
+            damage=self.damage,
+            weapon=self
         )
         projectiles.append(proj)
         print(f"Firing {self.name}! Projectiles count: {len(projectiles)}")
         print(f"Calling attack with muzzle_pos: {(muzzle_world_x, muzzle_world_y)}")
+        # Effects will be applied on projectile hit (handled elsewhere)
         return True
 
 
-    def update(self, dt):
+    def update(self, dt, **kwargs):
         if self.recoil_timer > 0:
             self.recoil_timer -= dt
             self.recoil_offset = self.recoil_strength * (self.recoil_timer / self.recoil_duration)
@@ -328,15 +339,10 @@ class DoublePistol(RangedWeapon):
             fire_rate=2.0,  # 2 shots per second
             projectile_speed=500
         )
-        # Load both sprites
-        try:
-            self.sprite_pistol = pygame.image.load(pistol_path).convert_alpha()
-        except Exception:
-            self.sprite_pistol = None
-        try:
-            self.sprite_pistol_hold = pygame.image.load(pistol_hold_path).convert_alpha()
-        except Exception:
-            self.sprite_pistol_hold = None
+        # Load both sprites using get_image for PyInstaller compatibility
+        from game.assets import get_image
+        self.sprite_pistol = get_image("sprite_pistol", pistol_path)
+        self.sprite_pistol_hold = get_image("sprite_pistol_hold", pistol_hold_path)
 
         
         if self.sprite_pistol_hold:
@@ -398,7 +404,17 @@ class DoublePistol(RangedWeapon):
         self.recoil_timer = self.recoil_duration
         if projectiles is None:
             return False
-
+        # Play gunfire sound twice
+        from game.assets import load_audio
+        gunfire_sound = load_audio("game/sounds/effects/gunfire.mp3")
+        if gunfire_sound:
+            SoundManager.get_instance().play_sfx(gunfire_sound)
+            import threading
+            def play_second():
+                import time
+                time.sleep(0.08)  # 80ms delay for double shot effect
+                SoundManager.get_instance().play_sfx(gunfire_sound)
+            threading.Thread(target=play_second, daemon=True).start()
         # Reconstruct conversion position from player_center and angle
         conversion_distance = 250
         conversion_pos = (
@@ -433,12 +449,14 @@ class DoublePistol(RangedWeapon):
                 y=muzzle_pos[1],
                 angle=bullet_angle,
                 speed=self.projectile_speed,
-                damage=self.damage
+                damage=self.damage,
+                weapon=self
             )
             projectiles.append(proj)
+            # Effects will be applied on projectile hit (handled elsewhere)
 
 
-    def update(self, dt):
+    def update(self, dt, **kwargs):
         if self.recoil_timer > 0:
             self.recoil_timer -= dt
             self.recoil_offset = self.recoil_strength * (self.recoil_timer / self.recoil_duration)
