@@ -40,7 +40,7 @@ class Button:
     def draw(self, surface, mouse_pos, selected=False):
         # Play hover/select sound when selected changes from False to True
         if selected and not self._was_selected and hover_sound:
-            from sound_manager import SoundManager
+            from game.util.sound_manager import SoundManager
 
             try:
                 SoundManager.get_instance().play_sfx(hover_sound)

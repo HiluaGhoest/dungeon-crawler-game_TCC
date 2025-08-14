@@ -2,7 +2,7 @@ import pygame
 import math
 import time
 from game.weapons.weapon import PistolBullet, Projectile, Weapon
-from sound_manager import SoundManager
+from game.util.sound_manager import SoundManager
 
 class RangedWeapon(Weapon):
     def __init__(self, name, sprite_path=None, color=(100, 200, 100), damage=8, fire_rate=0.8, projectile_speed=400):
@@ -11,7 +11,7 @@ class RangedWeapon(Weapon):
         self.fire_rate = fire_rate
         self.projectile_speed = projectile_speed
 
-    def attack(self, player_pos, angle, enemies=None, projectiles=None):
+    def attack(self, player_pos, angle, enemies=None, projectiles=None, damage_multiplier=1.0):
         # Allow attack to be called with just (player_pos, angle) for player usage
         if not self.can_attack():
             return False
@@ -24,7 +24,7 @@ class RangedWeapon(Weapon):
             y=player_pos[1],
             angle=angle,
             speed=self.projectile_speed,
-            damage=self.damage,
+            damage=round(self.damage * damage_multiplier),
             weapon=self
         )
         projectiles.append(proj)
@@ -107,7 +107,7 @@ class Pistol(RangedWeapon):
         muzzle_world_y = muzzle_screen_y + camera_y
         return (muzzle_world_x, muzzle_world_y), (muzzle_screen_x, muzzle_screen_y)
 
-    def attack(self, player_center, angle, enemies=None, projectiles=None, zoom=1.0, camera_x=0, camera_y=0, held=True):
+    def attack(self, player_center, angle, enemies=None, projectiles=None, zoom=1.0, camera_x=0, camera_y=0, held=True, damage_multiplier=1.0):
         if not self.can_attack():
             return False
         self.last_attack_time = time.time()
@@ -159,7 +159,7 @@ class Pistol(RangedWeapon):
             y=muzzle_world_y,
             angle=angle,
             speed=self.projectile_speed,
-            damage=self.damage,
+            damage=round(self.damage * damage_multiplier),
             weapon=self
         )
         projectiles.append(proj)
@@ -397,7 +397,7 @@ class DoublePistol(RangedWeapon):
         final_pos = (hand_pos[0] + offset.x, hand_pos[1] + offset.y)
         return final_pos
 
-    def attack(self, player_center, angle, enemies=None, projectiles=None, zoom=1.0):
+    def attack(self, player_center, angle, enemies=None, projectiles=None, zoom=1.0, damage_multiplier=1.0):
         if not self.can_attack():
             return False
         self.last_attack_time = time.time()
@@ -449,7 +449,7 @@ class DoublePistol(RangedWeapon):
                 y=muzzle_pos[1],
                 angle=bullet_angle,
                 speed=self.projectile_speed,
-                damage=self.damage,
+                damage=round(self.damage * damage_multiplier),
                 weapon=self
             )
             projectiles.append(proj)

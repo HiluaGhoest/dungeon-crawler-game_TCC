@@ -8,7 +8,7 @@ import cProfile
 from game.engine import GameEngine
 from game.util.ui import BTN_COLOR, FONT, HOVER_COLOR, TEXT_COLOR, Button, blur_surface
 from game.assets import load_audio
-from sound_manager import SoundManager
+from game.util.sound_manager import SoundManager
 from game.assets import get_image
 from game.assets import get_font
 
@@ -81,6 +81,13 @@ def start_singleplayer():
     game = GameEngine(screen)
     game.run()
 
+def run_store():
+    sound_mgr = SoundManager.get_instance()
+    sound_mgr.play_sfx(start_game)
+    fade_out()
+    game = GameEngine(screen)
+    game.run_store_room()
+
 def open_settings():
     run_settings_menu()
 
@@ -97,7 +104,6 @@ class ToggleButton:
         self.rect = pygame.Rect(rect)
         self.value = initial_value
         self.on_toggle = on_toggle
-
     def draw(self, surface, mouse_pos):
         color = HOVER_COLOR if self.rect.collidepoint(mouse_pos) else BTN_COLOR
         pygame.draw.rect(surface, color, self.rect, border_radius=12)
@@ -114,7 +120,9 @@ class ToggleButton:
 def run_settings_menu(background_snapshot=None):
     sound_mgr = SoundManager.get_instance()
     back_button = Button("Back", (WIDTH//2 - 150, HEIGHT - 100, 300, 60), lambda: None)
+    credits_button = Button("Credits", (WIDTH//2 - 150, HEIGHT - 180, 300, 60), lambda: run_credits_menu())
     back_selected = False
+    credits_selected = False
 
     # Volume slider state
     music_volume = sound_mgr.music_volume
@@ -169,7 +177,7 @@ def run_settings_menu(background_snapshot=None):
     # Main loop
 
     # Keyboard navigation state
-    selected_index = 0  # 0: back button, 1: music slider, 2: sfx slider
+    selected_index = 0  # 0: back button, 1: music slider, 2: sfx slider, 3: credits
     mouse_active = False
     while True:
         dt = clock.get_time() / 1000.0
@@ -196,20 +204,25 @@ def run_settings_menu(background_snapshot=None):
                 if event.key == pygame.K_ESCAPE:
                     return
                 elif event.key in (pygame.K_UP, pygame.K_w):
-                    selected_index = (selected_index - 1) % 3
+                    selected_index = (selected_index - 1) % 4
                     mouse_active = False
                 elif event.key in (pygame.K_DOWN, pygame.K_s):
-                    selected_index = (selected_index + 1) % 3
+                    selected_index = (selected_index + 1) % 4
                     mouse_active = False
                 elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     if selected_index == 0:
                         return
+                    elif selected_index == 3:
+                        run_credits_menu()
             elif event.type == pygame.MOUSEMOTION:
                 mouse_active = True
                 back_selected = back_button.rect.collidepoint(event.pos)
+                credits_selected = credits_button.rect.collidepoint(event.pos)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if back_button.rect.collidepoint(mouse_pos):
                     return
+                if credits_button.rect.collidepoint(mouse_pos):
+                    run_credits_menu()
                 if music_slider_rect.collidepoint(mouse_pos):
                     dragging_music = True
                     rel_x = max(music_slider_rect.left, min(mouse_pos[0], music_slider_rect.right))
@@ -257,7 +270,9 @@ def run_settings_menu(background_snapshot=None):
         # Draw back button with selection highlight
         back_selected_draw = back_selected or (not mouse_active and selected_index == 0)
         back_button.draw(screen, mouse_pos, selected=back_selected_draw)
-
+        # Draw credits button
+        credits_selected_draw = credits_selected or (not mouse_active and selected_index == 3)
+        credits_button.draw(screen, mouse_pos, selected=credits_selected_draw)
         # Draw crosshair
         screen.blit(crosshair_img, (mouse_pos[0] - crosshair_offset[0], mouse_pos[1] - crosshair_offset[1]))
 
@@ -308,12 +323,6 @@ _glow_levels = precompute_glows(glow_surface, max_blur=12, steps=6)
 ## Use this inside your animation loop, where slide_progress is defined:
 # idx = int((1 - slide_progress) * 6)  # 0..6
 # blurred_glow = _glow_levels[idx]
-
-button_targets = [
-    HEIGHT//2 + 150 - 60,
-    HEIGHT//2 + 240 - 60,
-    HEIGHT//2 + 330 - 60
-]
 
 def fade_out():
     fade = pygame.Surface((WIDTH, HEIGHT))
@@ -468,18 +477,26 @@ def run_credits_menu():
         clock.tick(60)
 
 buttons = []
-button_targets = [HEIGHT//2 + 30, HEIGHT//2 + 120, HEIGHT//2 + 210, HEIGHT//2 + 300]  # final Y positions
+button_height = 60
+# Move todos os botões para cima por um button_height
+button_targets = [
+    HEIGHT//2 - 60 + button_height,
+    HEIGHT//2 + 20 + button_height,
+    HEIGHT//2 + 100 + button_height,
+    HEIGHT//2 + 180 + button_height
+]
 
 def safe_exit():
     pygame.quit()
     sys.exit()
 
-for i, (label, action) in enumerate([
+
+# Adiciona o botão Store logo após Singleplayer
+menu_items = [
     ("Singleplayer", start_singleplayer),
-    ("Settings", open_settings),
-    ("Credits", run_credits_menu),
     ("Exit", safe_exit)
-]):
+]
+for i, (label, action) in enumerate(menu_items):
     rect = pygame.Rect(WIDTH//2 - 150, HEIGHT + 100, 300, 60)  # Start off-screen
     buttons.append(Button(label, rect, action))
 # --- Menu Crosshair Particle System ---
@@ -556,6 +573,14 @@ def run_menu():
     sound_mgr = SoundManager.get_instance()
     sound_mgr.play_music(menu_music)
 
+
+    # Botões do menu principal
+    play_button = Button("Play", (WIDTH//2 - 150, button_targets[0], 300, 60), start_singleplayer)
+    store_button = Button("Store", (WIDTH//2 - 150, button_targets[1], 300, 60), run_store)
+    settings_button = Button("Settings", (WIDTH//2 - 150, button_targets[2], 300, 60), open_settings)
+    quit_button = Button("Quit", (WIDTH//2 - 150, button_targets[3], 300, 60), safe_exit)
+    buttons = [play_button, store_button, settings_button, quit_button]
+
     # --- Opening Animation ---
     star_fade_duration = 120  # frames
     title_slide_duration = 60  # frames
@@ -610,7 +635,7 @@ def run_menu():
                 else:
                     button.rect.y = target_y
 
-                # Pre-select the first button (Singleplayer) visually
+                # Pre-select the first button (Singleplayer) visual
                 is_selected = (i == 0)
                 button.draw(screen, mouse_pos, selected=is_selected)
 
@@ -637,6 +662,17 @@ def run_menu():
     crosshair_img = crosshair_normal
     crosshair_offset = (size[0] // 2, size[1] // 2)
     pygame.mouse.set_visible(False)
+
+    # Prepare gear icon and rect for settings button (bottom left corner)
+    try:
+        gear_icon = get_image("gear_icon", "game/assets/sprites/ui/gear.png")
+        gear_icon_size = (48, 48)
+        if gear_icon:
+            gear_icon = pygame.transform.scale(gear_icon, gear_icon_size)
+    except Exception:
+        gear_icon = None
+        gear_icon_size = (48, 48)
+    gear_rect = pygame.Rect(32, HEIGHT - gear_icon_size[1] - 32, gear_icon_size[0], gear_icon_size[1])
 
     # Always reload and play menu music when entering menu
     while True:
@@ -683,6 +719,9 @@ def run_menu():
                             selected_index = i
                         break
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Verifica clique na engrenagem
+                if gear_rect.collidepoint(mouse_pos):
+                    open_settings()
                 # Handle mouse clicks
                 for i, button in enumerate(buttons):
                     if button.rect.collidepoint(mouse_pos):
@@ -703,6 +742,26 @@ def run_menu():
         update_and_draw_menu_particles(screen, mouse_pos, dt)
         # Draw custom crosshair at mouse position
         screen.blit(crosshair_img, (mouse_pos[0] - crosshair_offset[0], mouse_pos[1] - crosshair_offset[1]))
+
+        # Detecta hover na engrenagem
+        gear_hovered = gear_rect.collidepoint(mouse_pos)
+        # Easing para o crescimento
+        if not hasattr(run_menu, "gear_scale"):
+            run_menu.gear_scale = 1.0
+        target_scale = 1.25 if gear_hovered else 1.0
+        # Ease-out para suavizar
+        run_menu.gear_scale += (target_scale - run_menu.gear_scale) * 0.15
+        # Desenhar ícone de engrenagem no canto inferior esquerdo
+        gear_draw_angle = 0
+        if gear_hovered:
+            gear_draw_angle = (pygame.time.get_ticks() / 4) % 360  # gira rápido
+        if gear_icon:
+            gear_img = pygame.transform.rotozoom(gear_icon, gear_draw_angle, run_menu.gear_scale)
+            gear_img_rect = gear_img.get_rect(center=gear_rect.center)
+            screen.blit(gear_img, gear_img_rect.topleft)
+        else:
+            pygame.draw.circle(screen, (200,200,200), gear_rect.center, int(24 * run_menu.gear_scale))
+            pygame.draw.circle(screen, (100,100,100), gear_rect.center, int(20 * run_menu.gear_scale), 4)
 
         pygame.display.flip()
         clock.tick(60)

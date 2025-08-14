@@ -6,7 +6,7 @@ import numpy as np
 import sys
 from game.weapons.weapon import Weapon
 from game.assets import load_audio
-from sound_manager import SoundManager
+from game.util.sound_manager import SoundManager
 
 class MeleeWeapon(Weapon):
     _woosh_sound = None
@@ -25,15 +25,14 @@ class MeleeWeapon(Weapon):
         self.swing_start_time = 0
         self.swing_max_angle = 90
         self.swing_phase = 0  # 0 = none, 1 = forward, 2 = backward, 3 = finish
+        MeleeWeapon._woosh_sound = load_audio("game/sounds/effects/sword_woosh.wav")
+
 
     def can_attack(self):
         return (time.time() - self.last_attack_time) >= getattr(self, 'swing_cooldown', 1.0)
 
     def _play_woosh(self, phase):
         # phase: 1=high/fast, 2=slow/bassy, 3=fast/bassy
-        if MeleeWeapon._woosh_sound is None:
-            MeleeWeapon._woosh_sound = load_audio("game/sounds/effects/sword_woosh.wav")
-        # Ensure _woosh_array is loaded
         if MeleeWeapon._woosh_array is None and MeleeWeapon._woosh_sound is not None:
             try:
                 arr = pygame.sndarray.array(MeleeWeapon._woosh_sound)

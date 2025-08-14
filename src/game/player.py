@@ -1,3 +1,4 @@
+
 import math
 import time
 import pygame
@@ -9,7 +10,7 @@ from game.util.ui import ease_out_cubic
 from game.assets import get_image, load_audio
 import random
 
-from sound_manager import SoundManager
+from game.util.sound_manager import SoundManager
 
 class Player:
     def add_status(self, status_name, **kwargs):
@@ -76,7 +77,6 @@ class Player:
         self.sprite = None  # Disable sprite rendering to allow animation
         self.color = color  # Use the provided color
 
-            
         self.dropped_weapons = []  # List of (weapon, position)
 
         # Footprints system
@@ -89,6 +89,9 @@ class Player:
         self.powerups = {}  # theme -> current tier (int)
         self.active_powerup_effects = set()  # Set of effect functions to apply
         self.attack_held = False  # Track if attack button is held
+
+        # Aplica perks salvos ao jogador
+        self.apply_perk_levels()
 
     def get_powerup_tier(self, theme):
             """Get current tier for a theme."""
@@ -144,6 +147,30 @@ class Player:
 
     def has_powerup(self, theme, tier):
         return self.powerups.get(theme, 0) >= tier
+
+    
+    def apply_perk_levels(self, perks_save_path="perks.json"):
+        """Aplica os efeitos dos perks salvos conforme o nível."""
+        import os, json
+        if os.path.exists(perks_save_path):
+            try:
+                with open(perks_save_path, "r") as f:
+                    perks = json.load(f)
+                for p in perks:
+                    if not isinstance(p, dict):
+                        continue
+                    name = p.get("name")
+                    level = p.get("level", 1)
+                    if name == "Health Boost":
+                        self.max_health = 100 + 5 * level
+                        self.health = self.max_health
+                        self.display_health = self.health
+                    elif name == "Speed Boost":
+                        self.speed = 5 + 0.1 * level
+                    elif name == "Damage Boost":
+                        self.damage_multiplier = 1.0 + 0.05 * level
+            except Exception:
+                pass
 
     def render_weapon_hud(self, surface, screen_width, screen_height):
         # HUD: 3 squares at bottom right, using images for slots and weapon sprites
@@ -275,7 +302,7 @@ class Player:
                     text_rect.topleft = (rect.x + 10, rect.y + 10 + i * 22)
                     surface.blit(text_surface, text_rect)
 
-        # --- Pillar weapons (if pillar has weapon attribute) ---
+        # --- Pillar weapons and perks ---
         if room and hasattr(room, 'pillar_tiles'):
             interaction_radius = 32
             player_center = self.rect.center
@@ -283,6 +310,7 @@ class Player:
                 dx = pillar.rect.centerx - player_center[0]
                 dy = pillar.rect.centery - player_center[1]
                 dist = (dx ** 2 + dy ** 2) ** 0.5
+                # Overlay para armas
                 if dist <= interaction_radius and hasattr(pillar, 'weapon') and pillar.weapon:
                     weapon = pillar.weapon
                     info_lines = []
@@ -292,6 +320,19 @@ class Player:
                         info_lines.append(f"Damage: {getattr(weapon, 'damage')}")
                     if hasattr(weapon, 'type'):
                         info_lines.append(f"Type: {getattr(weapon, 'type')}")
+                    height = 20 + 22 * len(info_lines)
+                    rect = pygame.Rect(overlay_x, overlay_y, width, height)
+                    pygame.draw.rect(surface, box_color, rect, border_radius=border_radius)
+                    pygame.draw.rect(surface, border_color, rect, 2, border_radius=border_radius)
+                    for i, line in enumerate(info_lines):
+                        text_surface = info_font.render(line, True, (255, 255, 255))
+                        text_rect = text_surface.get_rect()
+                        text_rect.topleft = (rect.x + 10, rect.y + 10 + i * 22)
+                        surface.blit(text_surface, text_rect)
+                # Overlay para perks
+                if dist <= interaction_radius and hasattr(pillar, 'perk') and pillar.perk:
+                    perk = pillar.perk
+                    info_lines = [str(perk.name)]
                     height = 20 + 22 * len(info_lines)
                     rect = pygame.Rect(overlay_x, overlay_y, width, height)
                     pygame.draw.rect(surface, box_color, rect, border_radius=border_radius)
@@ -338,7 +379,12 @@ class Player:
                             pillar.weapon = None
                         # else: all slots full, do nothing
                     else:
-                        pillar.interact(self)
+                        # Se for PerkPillar, passar o stardust_manager
+                        from game.engine import stardust_manager
+                        if hasattr(pillar, 'perk') and pillar.perk:
+                            pillar.interact(self, stardust_manager=stardust_manager)
+                        else:
+                            pillar.interact(self)
 
     def attack(self, camera_x=0, camera_y=0, zoom=1.0, projectiles=None, enemies=None):
         weapon = self.get_active_weapon()
@@ -349,8 +395,9 @@ class Player:
         if isinstance(weapon, RangedWeapon):
             if projectiles is None:
                 return False
-            # Ranged weapons: let projectile handle damage, but optionally support floating numbers if you want
-            return weapon.attack(player_center, angle, projectiles=projectiles, enemies=enemies)
+            # Ranged weapons: let projectile handle damage, but agora passa o multiplicador de dano
+            damage_multiplier = getattr(self, 'damage_multiplier', 1.0)
+            return weapon.attack(player_center, angle, projectiles=projectiles, enemies=enemies, damage_multiplier=damage_multiplier)
         elif isinstance(weapon, MeleeWeapon):
             # Damage enemies in range and arc
             hit = False
@@ -359,7 +406,7 @@ class Player:
                 attack_range = getattr(weapon, 'attack_range', 80)
                 attack_angle = angle
                 arc_width = math.radians(70)  # 70 degree arc
-                damage = getattr(weapon, 'damage', 10)
+                damage = getattr(weapon, 'damage', 10) * getattr(self, 'damage_multiplier', 1.0)
                 # Adiciona controle para não atingir o mesmo inimigo mais de uma vez por swing
                 if not hasattr(weapon, '_already_hit_enemies') or weapon.swing_phase == 0:
                     weapon._already_hit_enemies = set()
@@ -772,7 +819,7 @@ class Player:
         top = (255, 255, 255)
 
         # Use cached custom font
-        from game.assets import FONTS
+        from game.assets import FONTS, get_font
         custom_font = FONTS["bar"]
 
         self._draw_vertical_bar_with_layers(
@@ -801,6 +848,35 @@ class Player:
             font=custom_font,
             value=self.display_stamina
         )
+
+        # Stardust Counter UI below the minimap, centered horizontally to the minimap
+        try:
+            from game.engine import stardust_manager
+            stardust_value = stardust_manager.stardust
+        except Exception:
+            stardust_value = 0
+        stardust_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 28)
+        stardust_text = f"{stardust_value}"
+        text_surface = stardust_font.render(stardust_text, True, (255, 255, 255))
+        text_rect = text_surface.get_rect()
+        # Get minimap position from dungeon.py
+        map_size = 150
+        map_margin = 20
+        map_x = surface.get_width() - map_size - map_margin
+        map_y = map_margin
+        # Position Stardust below minimap, centered horizontally
+        circle_radius = 6
+        spacing = 8
+        center_x = map_x + map_size // 2
+        stardust_y = map_y + map_size + spacing + text_rect.height // 2
+        # Center text horizontally to minimap
+        text_rect.centerx = center_x + circle_radius // 2
+        text_rect.centery = stardust_y
+        # Circle to the left of the number, centered vertically
+        circle_x = text_rect.left - spacing - circle_radius
+        circle_y = text_rect.centery
+        surface.blit(text_surface, text_rect)
+        pygame.draw.circle(surface, (255, 255, 255), (circle_x, circle_y), circle_radius)
 
 
     def update(self, rooms=None, dt=0.016, enemies=None ):

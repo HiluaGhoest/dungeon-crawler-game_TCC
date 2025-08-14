@@ -6,6 +6,7 @@ from game.room import Room
 from game.weapons.weapon import Weapon
 from game.weapons.ranged_weapons import Pistol, DoublePistol
 from game.weapons.melee_weapons import SteelSword
+from game.powerups.perks import Perk, HealthBoostPerk, SpeedBoostPerk, DamageBoostPerk
 
 class RoomGenerator:
     """Gerador de salas com formatos aleatórios."""
@@ -13,36 +14,37 @@ class RoomGenerator:
     def __init__(self, tile_size=20):
         self.tile_size = tile_size
 
-    def generate_rectangular_room(self, x, y, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False):
+    def generate_rectangular_room(self, x, y, depth=0, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False):
         """Gera uma sala retangular simples."""
-        width = random.randint(min_width, max_width) * self.tile_size
-        height = random.randint(min_height, max_height) * self.tile_size
-        print(f"[ROOM] Gerando sala retangular: {width//self.tile_size}x{height//self.tile_size} tiles (first_room: {is_first_room})")
+        growth_factor = 1 + 0.15 * depth
+        min_w = int(min_width * growth_factor)
+        max_w = int(max_width * growth_factor)
+        min_h = int(min_height * growth_factor)
+        max_h = int(max_height * growth_factor)
+        width = random.randint(min_w, max_w) * self.tile_size
+        height = random.randint(min_h, max_h) * self.tile_size
         
         room = TiledRoom(x, y, width, height, self.tile_size)
         return room
     
-    def generate_first_room(self, x, y, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False):
+    def generate_first_room(self, x, y, min_width=12, max_width=32, min_height=12, max_height=32, allow_islands=True, allow_subrooms=True, is_first_room=False, spawn_perks=False):
         """Gera uma sala retangular simples."""
         width = random.randint(min_width, max_width) * self.tile_size
         height = random.randint(min_height, max_height) * self.tile_size
-        print(f"[ROOM] Gerando sala retangular: {width//self.tile_size}x{height//self.tile_size} tiles (first_room: {is_first_room})")
-        
         room = TiledRoom(x, y, width, height, self.tile_size)
-
         if is_first_room:
-            room.add_pillars_in_circle(count=8)
-
+            # Se for a sala da loja, gera perks nos pilares
+            room.add_pillars_in_circle(count=8, spawn_perks=spawn_perks)
         return room
 
     
-    def generate_l_shaped_room(self, x, y):
+    def generate_l_shaped_room(self, x, y, depth=0):
         """Gera uma sala em formato de L."""
-        main_width = random.randint(12, 32) * self.tile_size
-        main_height = random.randint(22, 22) * self.tile_size
-        
-        ext_width = random.randint(8, 15) * self.tile_size
-        ext_height_tiles = random.randint(8, 12)
+        growth_factor = 1 + 0.15 * depth
+        main_width = random.randint(int(12 * growth_factor), int(32 * growth_factor)) * self.tile_size
+        main_height = random.randint(int(22 * growth_factor), int(22 * growth_factor)) * self.tile_size
+        ext_width = random.randint(int(8 * growth_factor), int(15 * growth_factor)) * self.tile_size
+        ext_height_tiles = random.randint(int(8 * growth_factor), int(12 * growth_factor))
         
         max_ext_height_tiles = (main_height // self.tile_size) // 2
         if ext_height_tiles > max_ext_height_tiles:
@@ -53,33 +55,27 @@ class RoomGenerator:
         
         ext_height = ext_height_tiles * self.tile_size
         
-        print(f"[ROOM] Gerando sala em formato de L:")
-        print(f"       Principal: {main_width//self.tile_size}x{main_height//self.tile_size}, Extensão: {ext_width//self.tile_size}x{ext_height//self.tile_size}")
         
         return LShapedRoom(x, y, main_width, main_height, ext_width, ext_height, self.tile_size)
     
-    def generate_random_room(self, x, y, is_first_room=False, last_opening_direction=None):
+    def generate_random_room(self, x, y, is_first_room=False, last_opening_direction=None, spawn_perks=False):
         if is_first_room:
-            return self.generate_rectangular_room(x, y, is_first_room=True)
-        
+            # Se for a sala da loja, gera perks nos pilares
+            return self.generate_first_room(x, y, is_first_room=True, spawn_perks=spawn_perks)
         room_types = [
             self.generate_rectangular_room,
             self.generate_l_shaped_room
         ]
-        
         room_names = [
             "Retangular",
             "Formato L"
         ]
-
         weights = [0.25, 0.25]
-        
         chosen_index = random.choices(range(len(room_types)), weights=weights)[0]
         room_type = room_types[chosen_index]
-        
-        print(f"[ROOM] Selecionado tipo: {room_names[chosen_index]}")
         return room_type(x, y)
     
+
 class Pillar:
     def __init__(self, x, y, tile_size, weapon=None, toggleable=True):
         self.rect = pygame.Rect(x, y, tile_size * 2, tile_size * 2)
@@ -90,18 +86,13 @@ class Pillar:
 
     def interact(self, player):
         # Não é mais possível devolver armas ao pilar
-
-        # Se o pilar tem arma e o jogador não tem
         if self.weapon and not player.weapon:
             player.weapon = self.weapon
             player.weapon_origin = self if self.toggleable else None
             print(f"[PILLAR] {self.weapon.name} pega pelo jogador.")
             self.weapon = None
             return
-
-        # Se o jogador já tem arma e esse pilar tem outra
         if self.weapon and player.weapon and self.weapon != player.weapon:
-            # Drop the player's current weapon instead of returning to pillar
             player.drop_weapon()
             player.weapon = self.weapon
             player.weapon_origin = self if self.toggleable else None
@@ -109,12 +100,97 @@ class Pillar:
             self.weapon = None
 
     def render(self, surface, camera_x=0, camera_y=0, zoom=1.0):
-        # Only render the weapon, not the pillar itself
         render_rect = self.rect.move(-camera_x, -camera_y)
         weapon_render_rect = render_rect.move(0, -32)
         if self.weapon:
             center = weapon_render_rect.center
             self.weapon.render_static(surface, center, camera_x, camera_y, zoom)
+
+class PerkPillar:
+    def __init__(self, x, y, tile_size, perk=None, base_cost=10, perks_save_path="perks.json"):
+        self.rect = pygame.Rect(x, y, tile_size * 2, tile_size * 2)
+        self.perk = perk
+        self.interacted = False
+        # Definir cor baseada no tipo de perk
+        self.color = (180, 220, 120)  # padrão
+        if perk:
+            if perk.name == "Health Boost":
+                self.color = (220, 80, 80)      # vermelho
+            elif perk.name == "Speed Boost":
+                self.color = (80, 180, 220)     # azul
+            elif perk.name == "Damage Boost":
+                self.color = (220, 180, 80)     # amarelo
+
+    def interact(self, player, stardust_manager=None, perks_save_path="perks.json"):
+        # Permite comprar o perk se tiver Stardust suficiente
+        if self.perk and stardust_manager:
+            import os, json
+            level = 1
+            if os.path.exists(perks_save_path):
+                try:
+                    with open(perks_save_path, "r") as f:
+                        perks = json.load(f)
+                        for p in perks:
+                            if isinstance(p, dict) and p.get("name") == self.perk.name:
+                                level = p.get("level", 1)
+                                break
+                except Exception:
+                    level = 1
+            cost = int((9 * level ** 2) / 4)
+            if stardust_manager.spend_stardust(cost):
+                self.perk.apply(player)
+                # Feedback visual: animação simples de compra
+                self.interacted = True
+                print(f"[PERK PILLAR] {self.perk.name} comprado por {cost} Stardust.")
+                # Salva perk adquirido
+                perks = []
+                if os.path.exists(perks_save_path):
+                    with open(perks_save_path, "r") as f:
+                        try:
+                            perks = json.load(f)
+                        except Exception:
+                            perks = []
+                # Verifica se o perk já existe e incrementa o nível
+                found = False
+                for p in perks:
+                    if isinstance(p, dict) and p.get("name") == self.perk.name:
+                        p["level"] = p.get("level", 1) + 1
+                        found = True
+                        break
+                if not found:
+                    perks.append({"name": self.perk.name, "level": 1})
+                with open(perks_save_path, "w") as f:
+                    json.dump(perks, f)
+            else:
+                # Feedback visual: animação de erro
+                self.interacted = False
+                print(f"[PERK PILLAR] Stardust insuficiente para comprar {self.perk.name}.")
+
+    def render(self, surface, camera_x=0, camera_y=0, zoom=1.0):
+        render_rect = self.rect.move(-camera_x, -camera_y)
+        pygame.draw.ellipse(surface, self.color, render_rect)
+        # Exibe o custo do perk (sempre atualizado e sem símbolo, cor branca)
+        if self.perk:
+            import os, json
+            level = 1
+            perks_save_path = "perks.json"
+            if os.path.exists(perks_save_path):
+                try:
+                    with open(perks_save_path, "r") as f:
+                        perks = json.load(f)
+                        for p in perks:
+                            if isinstance(p, dict) and p.get("name") == self.perk.name:
+                                level = p.get("level", 1)
+                                break
+                except Exception:
+                    level = 1
+            cost = int((9 * level ** 2) / 4)
+            font = pygame.font.SysFont('arial', 16)
+            cost_text = font.render(f"{cost}", True, (255, 255, 255))
+            surface.blit(cost_text, (render_rect.centerx - cost_text.get_width() // 2, render_rect.bottom + 2))
+        # Feedback visual: animação simples
+        if self.interacted:
+            pygame.draw.ellipse(surface, (255, 255, 0), render_rect, 4)
 
 class DustParticle:
     def __init__(self, x, y, size=None):
@@ -171,32 +247,38 @@ class TiledRoom(Room):
             if self.is_floor_tile(x, y):
                 self.dust_particles.append(DustParticle(x, y))
 
-    def add_pillars_in_circle(self, count=8):
-
+    def add_pillars_in_circle(self, count=8, spawn_perks=False):
         import math
         import random
-
-        available_weapons = [SteelSword, Pistol, DoublePistol]  # Add more weapon classes here as needed
-        weapon_types = available_weapons.copy()
-        random.shuffle(weapon_types)
-
         center_x = self.x + self.width // 2
         center_y = self.y + self.height // 2
         radius = min(self.width, self.height) // 3
-
-        for i in range(count):
-            angle = (2 * math.pi / count) * i
-            px = center_x + int(radius * math.cos(angle))
-            py = center_y + int(radius * math.sin(angle))
-
-            tile_x = (px // self.tile_size) * self.tile_size
-            tile_y = (py // self.tile_size) * self.tile_size
-
-            # Assign one weapon of each type, rest are None
-            weapon = weapon_types[i]() if i < len(weapon_types) else None
-
-            pillar = Pillar(tile_x, tile_y, self.tile_size, weapon=weapon, toggleable=True)
-            self.pillar_tiles.append(pillar)
+        if spawn_perks:
+            available_perks = [HealthBoostPerk, SpeedBoostPerk, DamageBoostPerk]
+            perk_types = available_perks.copy()
+            random.shuffle(perk_types)
+            for i in range(count):
+                angle = (2 * math.pi / count) * i
+                px = center_x + int(radius * math.cos(angle))
+                py = center_y + int(radius * math.sin(angle))
+                tile_x = (px // self.tile_size) * self.tile_size
+                tile_y = (py // self.tile_size) * self.tile_size
+                perk = perk_types[i]() if i < len(perk_types) else None
+                pillar = PerkPillar(tile_x, tile_y, self.tile_size, perk=perk)
+                self.pillar_tiles.append(pillar)
+        else:
+            available_weapons = [SteelSword, Pistol, DoublePistol]
+            weapon_types = available_weapons.copy()
+            random.shuffle(weapon_types)
+            for i in range(count):
+                angle = (2 * math.pi / count) * i
+                px = center_x + int(radius * math.cos(angle))
+                py = center_y + int(radius * math.sin(angle))
+                tile_x = (px // self.tile_size) * self.tile_size
+                tile_y = (py // self.tile_size) * self.tile_size
+                weapon = weapon_types[i]() if i < len(weapon_types) else None
+                pillar = Pillar(tile_x, tile_y, self.tile_size, weapon=weapon, toggleable=True)
+                self.pillar_tiles.append(pillar)
 
             
     def _generate_wall_tiles(self):
@@ -355,11 +437,7 @@ class TiledRoom(Room):
             rect.y -= self.y
             pygame.draw.rect(surface, self.wall_color, rect)
         # Draw pillars
-        for pillar in self.pillar_tiles:
-            pillar_rect = pillar.rect.copy()
-            pillar_rect.x -= self.x
-            pillar_rect.y -= self.y
-            pygame.draw.rect(surface, (100, 100, 120), pillar_rect)
+    # Não desenhar o retângulo do pilar, apenas renderizar a arma (feito no método render do Pillar)
         # Draw dust particles
         for dust in self.dust_particles:
             dust_x = int(dust.x - self.x)

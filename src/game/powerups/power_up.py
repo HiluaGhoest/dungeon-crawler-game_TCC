@@ -270,8 +270,7 @@ def paralyzing_venom_effect(player):
             print(f"[DEBUG] Weapon: Added Paralyzing Venom PoisonEffect and SlowEffect (1/3 chance) to weapon {weapon}.")
 
 def volatile_reaction_effect(player):
-    """Tier 5: Poisoned enemies hit by fire create a gas explosion, damaging nearby enemies."""
-    import random
+    """Tier 5: Se explosion_catalyst_effect para ativado em um inimigo envenenado, espalha PoisonEffect para inimigos próximos."""
     from game.effects import PoisonEffect
     for weapon in getattr(player, 'weapons', []):
         if weapon:
@@ -279,18 +278,27 @@ def volatile_reaction_effect(player):
                 weapon.effects = []
             # Remove previous volatile_reaction effects
             weapon.effects = [e for e in weapon.effects if getattr(e, '_effect_type', None) != 'volatile_reaction']
-            def poison_chance(enemy):
-                poison = PoisonEffect(
-                    damage_per_tick=4,
-                    tick_interval=0.5,
-                    duration=6.0,
-                    level=5
-                )
-                enemy.add_effect(poison)
-            poison_chance._effect_type = 'volatile_reaction'
-            weapon.effects.append(poison_chance)
-            print(f"[DEBUG] Weapon: Added Volatile Reaction PoisonEffect (1/1 chance) to weapon {weapon}.")
-    # Fire synergy should be handled in enemy/fire damage logic
+            import random
+            def spread_toxin_on_explosion(enemy, damage_dealt=0):
+                print("[DEBUG] spread_toxin_on_explosion called")  # Adicione este print para testar
+                if damage_dealt >= 2147483647 or getattr(enemy, 'is_dead', False):
+                    print("[DEBUG] explosion_catalyst_effect triggered")  # Outro print para garantir
+                    # Remova a condição de random para testar
+                    current_room = getattr(player, 'current_room', None)
+                    if current_room and hasattr(current_room, 'enemies'):
+                        for other_enemy in current_room.enemies:
+                            if other_enemy != enemy:
+                                poison = PoisonEffect(
+                                    damage_per_tick=4,
+                                    tick_interval=0.5,
+                                    duration=6.0,
+                                    level=5
+                                )
+                                other_enemy.add_effect(poison)
+                                print(f"[DEBUG] ToxicSpread: {other_enemy} foi envenenado pela explosão de {enemy}.")
+            spread_toxin_on_explosion._effect_type = 'volatile_reaction'
+            weapon.effects.append(spread_toxin_on_explosion)
+            print(f"[DEBUG] Weapon: Adicionado efeito de espalhamento de toxina na explosão para {weapon}.")
 
 # Power-up tree
 poison1 = PowerUp('Poison Shot', 'Every shot has a chance to apply poison.', poison_effect, 'Poison', 1)

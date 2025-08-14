@@ -15,7 +15,7 @@ class Dungeon:
 
     """Manages the dungeon progression through multiple rooms."""
     
-    def __init__(self, tile_size=20, total_rooms=25, branching_factor=3):
+    def __init__(self, tile_size=20, total_rooms=25, branching_factor=3, spawn_perks=False):
         self.tile_size = tile_size
         self.total_rooms = total_rooms
         self.branching_factor = branching_factor
@@ -26,19 +26,19 @@ class Dungeon:
         self.opening_positions = []
         self.room_opening_configs = {}
         self.room_opening_sides = {}
-        self.room_connections = {}  # Tracks connections between rooms
-        self.room_parent = {}       # Tracks parent-child relationships
-        self.room_depth = {}        # Tracks depth from start room
+        self.room_connections = {}
+        self.room_parent = {}
+        self.room_depth = {}
         self.occupied_positions = set()
-        self.visited_rooms = set()  # Track rooms player has visited
+        self.visited_rooms = set()
+        self.spawn_perks = spawn_perks
 
         # Generate all rooms at their final positions
         self._generate_and_position_rooms()
-        
-        # Reset to first room after generation
+
         self.current_room_index = 0
         self.previous_room_index = None
-        self.visited_rooms.add(0)  # Mark first room as visited
+        self.visited_rooms.add(0)
     
     def _generate_and_position_rooms(self):
         """Generate and position all rooms of the dungeon with branching paths."""
@@ -54,17 +54,18 @@ class Dungeon:
         # Create first room
         first_room = self.room_generator.generate_first_room(
             0, 0, min_width=32, max_width=32, min_height=32, max_height=32,
-            is_first_room=True
+            is_first_room=True,
+            spawn_perks=self.spawn_perks
         )
         self.rooms[0] = first_room
         self.room_depth[0] = 0
         self.room_connections[0] = []
         self.room_parent[0] = None
 
-        room_queue = deque([0])
         rooms_created = 1
 
         # FIRST PASS: Build connection graph
+        room_queue = deque([0])
         while rooms_created < self.total_rooms and room_queue:
             parent_idx = room_queue.popleft()
             parent_depth = self.room_depth[parent_idx]
@@ -85,7 +86,6 @@ class Dungeon:
 
                 chosen_side = available_sides[0]
                 self.room_reserved_sides[parent_idx].add(chosen_side)
-
                 child_idx = rooms_created
                 self.rooms[child_idx] = None  # Placeholder
                 self.room_depth[child_idx] = parent_depth + 1
@@ -98,10 +98,11 @@ class Dungeon:
                 room_queue.append(child_idx)
                 rooms_created += 1
 
-                
-                # Store this directional connection
+                self.rooms[child_idx] = self.room_generator.generate_random_room(0, 0)
                 if parent_idx not in self.room_opening_sides:
                     self.room_opening_sides[parent_idx] = {'next': {}}
+                if 'next' not in self.room_opening_sides[parent_idx]:
+                    self.room_opening_sides[parent_idx]['next'] = {}
                 self.room_opening_sides[parent_idx]['next'][child_idx] = chosen_side
 
         # SECOND PASS: Generate rooms and position them
@@ -114,7 +115,8 @@ class Dungeon:
 
             # Garante que sala atual exista
             if self.rooms[room_idx] is None:
-                self.rooms[room_idx] = self.room_generator.generate_random_room(0, 0)
+                depth = self.room_depth.get(room_idx, 0)
+                self.rooms[room_idx] = self.room_generator.generate_random_room(0, 0, depth=depth)
 
             self.current_room_index = room_idx
 
@@ -142,8 +144,8 @@ class Dungeon:
                     visited.add(child_idx)
 
                     # Criar inimigos na sala filha
-                    self.spawn_enemies_in_room(child_idx, num_enemies=self.room_depth[child_idx] * 2, 
-                                               enemy_classes=[Enemy, VoidWrath])
+                    self.spawn_enemies_in_room(child_idx, num_enemies=int((9 * self.room_depth[child_idx] ** 2) / 7), 
+                                                   enemy_classes=[Enemy, VoidWrath])
 
         print(f"[DUNGEON] Created {rooms_created} rooms with branching structure")
         print(f"Room connections: {self.room_connections}")
@@ -151,10 +153,8 @@ class Dungeon:
 
     def _position_new_room(self, child_idx):
         """Position a newly generated child room relative to its parent using opening alignment."""
-        print(f"[DEBUG] Room {child_idx} parent is {self.room_parent.get(child_idx)}")
 
         parent_idx = self.room_parent[child_idx]
-        print(f"[POSITION] Positioning room {child_idx} relative to parent {parent_idx}")
 
         self.previous_room_index = parent_idx  # <-- FIX HERE
 
@@ -167,14 +167,9 @@ class Dungeon:
             next_dict = self.room_opening_sides[parent_idx].get('next', {})
             parent_side = next_dict.get(child_idx, None)
 
-        print(f"[POSITION] Parent room {parent_idx} opening side for child {child_idx}: {parent_side}")
-
         # Get parent and child openings
         parent_opening = self._get_opening_rect(parent_room, f'next_{child_idx}')
         child_opening = self._get_opening_rect(child_room, 'previous')
-
-        print(f"[DEBUG] Parent opening rect (room {parent_idx}, next_{child_idx}): {parent_opening}")
-        print(f"[DEBUG] Child opening rect (room {child_idx}, previous): {child_opening}")
 
         if parent_opening and child_opening:
             parent_opening_global = parent_opening.move(parent_room.x, parent_room.y)
@@ -196,7 +191,6 @@ class Dungeon:
                 dx += gap
 
             child_room.shift_position(dx, dy)
-            print(f"[DUNGEON] Room {child_idx} positioned at ({child_room.x}, {child_room.y})")
         else:
             # Fallback: place to the right with large spacing
             print(f"[WARNING] Missing openings for precise positioning, using fallback.")
@@ -220,7 +214,6 @@ class Dungeon:
 
             child_room.shift_position(dx, dy)
             self.occupied_positions.add((child_room.x, child_room.y))
-            print(f"[DUNGEON] Room {child_idx} (fallback) positioned at ({child_room.x}, {child_room.y})")
         
     def _get_opening_rect(self, room, opening_type):
         if hasattr(room, 'opening_rects'):
@@ -235,24 +228,26 @@ class Dungeon:
         current_room = self.rooms[self.current_room_index]
         room_idx = self.current_room_index
         
-        print(f"[DEBUG] Setting up room {room_idx} connections...")
         
         # Restore original wall tiles before creating openings
         if hasattr(current_room, 'original_wall_tiles'):
             current_room.wall_tiles = current_room.original_wall_tiles.copy()
             print(f"[DEBUG] Restored original wall tiles for room {room_idx}")
+            if hasattr(current_room, '_cache_room_surface'):
+                current_room._cache_room_surface()
         elif hasattr(current_room, 'original_walls'):
             current_room.walls = current_room.original_walls.copy()
             print(f"[DEBUG] Restored original walls for room {room_idx}")
+            if hasattr(current_room, '_cache_room_surface'):
+                current_room._cache_room_surface()
         
         # Check if we already have opening configuration for this room
         if room_idx in self.room_opening_configs:
-            print(f"[DEBUG] Using existing opening config for room {room_idx}")
             opening_config = self.room_opening_configs[room_idx]
             self._restore_openings_from_config(current_room, opening_config)
-            print(f"[DEBUG] Restored {len(self.opening_positions)} openings for room {room_idx}")
+            if hasattr(current_room, '_cache_room_surface'):
+                current_room._cache_room_surface()
         else:
-            print(f"[DEBUG] Creating new openings for room {room_idx}")
             opening_size = self.tile_size * 4
             self.opening_positions = []
             
@@ -260,30 +255,22 @@ class Dungeon:
             opening_sides = self._get_opening_sides_for_room()
             self.room_opening_sides[self.current_room_index] = opening_sides
 
-            print(f"[DEBUG] Opening sides for room {room_idx}: {opening_sides}")
             
             # For all room types, create openings on the determined sides
             if hasattr(current_room, 'wall_tiles'):
-                print(f"[DEBUG] Creating openings on tiled room {room_idx}")
                 self._create_opening_rects_on_tiled_room(current_room, opening_size, opening_sides)
             else:
                 print(f"[DEBUG] Creating openings on standard room {room_idx}")
                 self._create_openings_on_standard_room(current_room, opening_size, opening_sides)
             
-            print(f"[DEBUG] Created {len(self.opening_positions)} openings for room {room_idx}")
+            if hasattr(current_room, '_cache_room_surface'):
+                current_room._cache_room_surface()
             
             # Store the opening configuration and sides
             self._store_opening_configuration(current_room)
             self.room_opening_sides[room_idx] = opening_sides
-            print(f"[DEBUG] Stored opening config for room {room_idx} with {len(self.room_opening_configs[room_idx]['openings'])} openings")
-        
-        print(f"[DEBUG] Room {room_idx} wall tiles: {len(current_room.wall_tiles) if hasattr(current_room, 'wall_tiles') else 'N/A'}")
-        print(f"[DEBUG] Room {room_idx} walls: {len(current_room.walls) if hasattr(current_room, 'walls') else 'N/A'}")
         
     def _get_opening_sides_for_room(self):
-        print(f"[DEBUG] current_room_index: {self.current_room_index}")
-        print(f"[DEBUG] self.room_connections: {self.room_connections}")
-        print(f"[DEBUG] self.room_opening_sides: {self.room_opening_sides}")
 
         opening_sides = self.room_opening_sides.get(self.current_room_index, {})  # preserve any existing data
 
@@ -291,7 +278,6 @@ class Dungeon:
         children = [neighbor for neighbor in self.room_connections.get(self.current_room_index, [])
                     if self.room_parent.get(neighbor) == self.current_room_index]
 
-        print(f"[DEBUG] Children for room {self.current_room_index}: {children}")
 
         if children:
             # Exclude the side used for the previous opening (connection to parent)
@@ -316,7 +302,6 @@ class Dungeon:
                 side = available_sides.pop(0)
                 assigned_sides[child_idx] = side
                 opening_sides['next'][child_idx] = side
-                print(f"[OPENING_SIDES] Room {self.current_room_index} child {child_idx} assigned to {side} side")
                 # Store the parent’s info immediately
                 if self.current_room_index not in self.room_opening_sides:
                     self.room_opening_sides[self.current_room_index] = {}
@@ -327,7 +312,6 @@ class Dungeon:
             pass
         else:
             parent_idx = self.room_parent.get(self.current_room_index)
-            print(f"[OPENING_SIDES] Room {self.current_room_index}: parent is {parent_idx}")
 
             parent_side = None
             if parent_idx in self.room_opening_sides:
@@ -335,8 +319,6 @@ class Dungeon:
                 parent_side = next_dict.get(self.current_room_index, None)
                 if parent_side:
                     opening_sides['previous'] = self._get_opposite_side(parent_side)
-                    print(f"[OPENING_SIDES] Setting previous opening to opposite: {self._get_opposite_side(parent_side)}")
-                    print(f"[OPENING_SIDES] Parent side for child {self.current_room_index}: {parent_side}")
 
             if parent_side is None:
                 print(f"[WARNING] Parent side unknown for room {self.current_room_index}, using heuristic")
@@ -353,11 +335,9 @@ class Dungeon:
             if parent_side:
                 # The previous opening in the child should be on the same side as the parent's connection to the child
                 opening_sides['previous'] = self._get_opposite_side(parent_side)
-                print(f"[OPENING_SIDES] Setting previous opening to opposite: {self._get_opposite_side(parent_side)} (parent side: {parent_side})")
 
         # Finalmente, persista os lados abertos calculados
         self.room_opening_sides.setdefault(self.current_room_index, {}).update(opening_sides)
-        print(f"[OPENING_SIDES] Final opening sides for room {self.current_room_index}: {opening_sides}")
         return opening_sides
 
 
@@ -610,10 +590,8 @@ class Dungeon:
                         'type': opening_type if 'next_' in opening_type else 'previous',
                         'side': side
                     })
-                    print(f"[OPENINGS] Created opening '{opening_type}' at {opening_rect} on side '{side}' in room {self.current_room_index}")
 
     def _create_opening_rects_on_tiled_room(self, room, opening_size, opening_sides):
-        print(f"[OPENINGS] Creating opening rects (no triggers) on room {self.current_room_index}")
 
         wall_tiles = getattr(room, 'wall_tiles', [])
         if not wall_tiles:
@@ -677,10 +655,8 @@ class Dungeon:
                         'side': side
                     })
 
-                    print(f"[OPENINGS] Created opening rect '{opening_type}' at {opening_rect} on side '{side}'")
 
     def _create_triggers_for_room(self, room_idx):
-        print(f"[DEBUG] Creating triggers for room {room_idx}...")
 
         room = self.rooms[room_idx]
         if not hasattr(room, 'opening_rects'):
@@ -697,7 +673,6 @@ class Dungeon:
             return
 
         for opening_type, rect in opening_rects.items():
-            print(f"[DEBUG] Processing opening '{opening_type}' with rect {rect}")
 
             side = None
             found_side = False
@@ -705,7 +680,6 @@ class Dungeon:
                 if o['type'] == opening_type:
                     side = o['side']
                     found_side = True
-                    print(f"[DEBUG] Found side '{side}' for opening '{opening_type}'")
                     break
             if not found_side:
                 print(f"[WARNING] No side found in 'opening_positions' for opening '{opening_type}'")
@@ -720,7 +694,6 @@ class Dungeon:
                     trigger_rect.x -= self.tile_size
                 elif side == 'right':
                     trigger_rect.x += self.tile_size
-                print(f"[DEBUG] Adjusted trigger_rect for side '{side}': {trigger_rect}")
             else:
                 print(f"[WARNING] Side is None, trigger_rect not adjusted: {trigger_rect}")
 
@@ -733,7 +706,6 @@ class Dungeon:
             else:
                 target_idx = self.room_parent.get(room_idx, None)
 
-            print(f"[DEBUG] Trigger target index for '{opening_type}': {target_idx}")
 
             room.opening_triggers.append({
                 'rect': trigger_rect,
@@ -742,7 +714,6 @@ class Dungeon:
                 'target': target_idx
             })
 
-            print(f"[TRIGGER] Created trigger for '{opening_type}' at {trigger_rect} targeting room {target_idx}")
 
 
     def _create_openings_on_standard_tiled_room(self, room, opening_size, opening_sides, wall_tiles):
@@ -1652,7 +1623,6 @@ class Dungeon:
                             break
                     if not overlap:
                         room.enemies.append(enemy_cls(spawn_x, spawn_y))
-                        print(f"[SPAWN] Spawned {enemy_cls.__name__} {i} in room {room_idx} at ({spawn_x}, {spawn_y})")
                         break
                 attempts += 1
             else:
@@ -1673,4 +1643,3 @@ class Dungeon:
                     offset = (i+1) * enemy_size
                     room.enemies.append(enemy_cls(center_x + offset, center_y + offset))
                     print(f"[SPAWN] Emergency Fallback {enemy_cls.__name__} {i} in room {room_idx} at ({center_x + offset}, {center_y + offset})")
-        print(f"[SPAWN] Room {room_idx} (depth {self.room_depth.get(room_idx, 0)}) has {len(room.enemies)} enemies.")

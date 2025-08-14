@@ -13,7 +13,105 @@ from game.assets import get_font, get_image
 import builtins
 from game.util.ui import blur_surface
 
+
+import json
+
+# Stardust: moeda coletável
+class Stardust:
+    def __init__(self, x, y, amount=1):
+        self.x = x
+        self.y = y
+        self.amount = amount
+        self.radius = 2 + amount * 2  # Tamanho proporcional ao valor
+        self.collected = False
+        self.float_timer = 0.0
+        self.float_duration = 0.7
+        self.vx = random.uniform(-0.3, 0.3)
+        self.vy = random.uniform(-0.2, 0.2)
+
+    def update(self, dt, player):
+        # Stardust flutua e faz bobbing
+        self.float_timer += dt
+        self.x += self.vx
+        self.y += self.vy + math.sin(self.float_timer * 4) * 0.2  # bobbing vertical
+        # Suaviza movimento
+        self.vx *= 0.95
+        # Se perto do player, move em direção com easing
+        dist = math.hypot(player.x - self.x, player.y - self.y)
+        if dist < 250:
+            # Easing: quanto mais perto, mais rápido (ease-out)
+            t = min(1.0, dist / 250)
+            ease = 1 - (1 - t) ** 2  # ease-out quad
+            dx = (player.x - self.x) * 0.12 * ease
+            dy = (player.y - self.y) * 0.12 * ease
+            self.x += dx
+            self.y += dy
+            if dist < player.size * 2:
+                self.collected = True
+
+    def draw(self, surface, camera_x, camera_y, rooms=None):
+        px = int(self.x - camera_x)
+        py = int(self.y - camera_y)
+        color = (255, 255, 255)
+        pygame.draw.circle(surface, color, (px, py), int(self.radius))
+
+# Gerenciador de Stardust
+class StardustManager:
+    def __init__(self, save_path="stardust.json"):
+        self.save_path = save_path
+        self.stardust = 0
+        self.load_stardust()
+
+    def add_stardust(self, amount):
+        self.stardust += amount
+        self.save_stardust()
+
+    def spend_stardust(self, amount):
+        if self.stardust >= amount:
+            self.stardust -= amount
+            self.save_stardust()
+            return True
+        return False
+
+    def save_stardust(self):
+        with open(self.save_path, "w") as f:
+            json.dump({"stardust": self.stardust}, f)
+
+    def load_stardust(self):
+        if os.path.exists(self.save_path):
+            with open(self.save_path, "r") as f:
+                data = json.load(f)
+                self.stardust = data.get("stardust", 0)
+        else:
+            self.stardust = 0
+
+# Instância global do gerenciador de stardust
+stardust_manager = StardustManager()
+
 class GameEngine:
+    def run_store_room(self):
+        """Executa o fluxo normal, mas com animação de introdução personalizada 'Store'."""
+        # Cria uma dungeon com apenas 1 sala para o modo loja
+        # Passa spawn_perks=True para garantir que a loja gere PerkPillar
+        self.dungeon = Dungeon(tile_size=20, total_rooms=1, branching_factor=1, spawn_perks=True)
+        self.room = self.dungeon.get_current_room()
+        spawn_x, spawn_y = self.dungeon.get_player_spawn_position()
+        self.player = Player(spawn_x, spawn_y)
+        self.dungeon.player = self.player
+        self.camera_x = spawn_x - self.width // 2
+        self.camera_y = spawn_y - self.height // 2
+        self.run_intro_cutscene(floor_number="Store", message="Welcome to the Store!", post_delay=0.6, overlay_fade_duration=0.5)
+        self.tutorial_step = 0
+        self.tutorial_phrases = [
+            "WASD to move, Shift to sprint.",
+            "Press E to pick up weapon, Q to drop."
+        ]
+        accumulated_pause_time = 0
+        while self.running:
+            self.handle_events()
+            dt = self.clock.tick(144) / 1000.0
+            self.update(dt)
+            self.render()
     # Persistent virtual surface for zoomed rendering
     def run_game_over_screen(self):
         """Show a game over overlay and wait for player to restart the floor or quit."""
@@ -214,6 +312,7 @@ class GameEngine:
         self.target_scale = 1.0
 
         self.enemies = []
+        self.stardusts = []
         
     def update_crosshair(self, dt):
         """Smoothly transition between crosshair states"""
@@ -688,6 +787,13 @@ class GameEngine:
             enemy.update(dt, player_pos=(self.player.x, self.player.y), 
                          other_enemies=self.enemies, player=self.player)
 
+        # --- UPDATE STARDUSTS ---
+        for stardust in self.stardusts[:]:
+            stardust.update(dt, self.player)
+            if stardust.collected:
+                stardust_manager.add_stardust(stardust.amount)
+                self.stardusts.remove(stardust)
+
         # --- POWER-UP MENU TRIGGER ---
         # If all enemies in the room are cleared and menu not already active, show power-up menu
         if hasattr(self, 'powerup_menu') and self.powerup_menu and self.powerup_menu.active:
@@ -837,6 +943,10 @@ class GameEngine:
         enemies = getattr(current_room, 'enemies', []) if hasattr(current_room, 'enemies') else []
         for enemy in enemies:
             enemy.draw(virtual_surface, self.camera_x, self.camera_y)
+
+        # --- RENDER STARDUSTS ---
+        for stardust in self.stardusts:
+            stardust.draw(virtual_surface, self.camera_x, self.camera_y, rooms=rooms_to_render)
 
         # Render the player
         if not (hasattr(self.player, 'is_dead') and self.player.is_dead and \
@@ -993,7 +1103,10 @@ class GameEngine:
         # Fonts / text
         title_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 72)
         subtitle_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 36)
-        title = title_font.render(f"FLOOR {floor_number}", True, (255, 255, 255))
+        if str(floor_number).lower() == "store":
+            title = title_font.render("STORE", True, (255, 255, 255))
+        else:
+            title = title_font.render(f"FLOOR {floor_number}", True, (255, 255, 255))
         subtitle = subtitle_font.render(message, True, (200, 200, 200))
 
         # starfield (we'll draw stars into overlay surface so they can fade)

@@ -3,13 +3,14 @@ import pygame
 import math
 import time
 
-from sound_manager import SoundManager
+from game.util.sound_manager import SoundManager
 from . import assets
 
 class Enemy:
-    # Preload death sound as a class variable
+    # Preload resources as class variables (cache)
     death_sound = assets.load_audio('game/sounds/effects/slime_death.wav')
     hit_sound = assets.load_audio('game/sounds/effects/enemy_hit.wav')
+    damage_font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
     # Throttle AI checks
     _ai_throttle_interval = 0.1  # seconds
 
@@ -162,6 +163,11 @@ class Enemy:
                 'alpha': 255,
                 'timer': 0.0
             })
+        # Drop apenas um stardust por inimigo, tamanho depende do valor
+        from game.engine import Stardust
+        if hasattr(self, 'engine') and hasattr(self.engine, 'stardusts'):
+            amount = random.randint(1, 3)
+            self.engine.stardusts.append(Stardust(self.x + random.randint(-8,8), self.y + random.randint(-8,8), amount=amount))
 
     def update(self, dt=0.016, player_pos=None, other_enemies=None, player=None):
         # --- Process status effects ---
@@ -457,7 +463,7 @@ class Enemy:
                     draw_y = int(chunk['y'] - camera_y)
                     surface.blit(chunk_surf, (draw_x, draw_y))
             # Render floating damage numbers mesmo durante a morte
-            font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
+            font = Enemy.damage_font
             damage_lifetime = 0.7
             damage_rise = 30
             now = time.time()
@@ -505,7 +511,7 @@ class Enemy:
             surface.blit(footprint_surf, (fp_x - footprint_radius - camera_x, fp_y - footprint_radius - camera_y))
 
         # --- Render floating damage numbers ---
-        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
+        font = Enemy.damage_font
         damage_lifetime = 0.7  # seconds
         damage_rise = 30  # pixels
         for dmg in self.floating_damage[:]:
@@ -548,7 +554,7 @@ class Enemy:
         enemy_rect = pygame.Rect(new_x, new_y, new_width, new_height)
         # Contorno rosa avermelhado
         outline_color = (255, 100, 180)  # cor do contorno
-        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
+        font = Enemy.damage_font
         outline_alpha = death_alpha
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, border_radius=6)
         pygame.draw.rect(surface, (*outline_color, outline_alpha), enemy_rect, width=4, border_radius=6)
@@ -603,11 +609,15 @@ class VoidWrath(Enemy):
 
         self.damage = 25
 
-        # Preload dizzy sound effect
-        self.dizzy_sound = assets.load_audio('game/sounds/effects/void_wrath_dizzing.wav')
-        # Preload telegraphy sound effect
-        self.telegraphy_sound = assets.load_audio('game/sounds/effects/telegraphy_void_wrath.wav')
-        self.telegraphy_sound.set_volume(0.3)  # Set volume to 50%
+        # Preload dizzy sound effect (cache)
+        if not hasattr(VoidWrath, 'dizzy_sound'):
+            VoidWrath.dizzy_sound = assets.load_audio('game/sounds/effects/void_wrath_dizzing.wav')
+        self.dizzy_sound = VoidWrath.dizzy_sound
+        # Preload telegraphy sound effect (cache)
+        if not hasattr(VoidWrath, 'telegraphy_sound'):
+            VoidWrath.telegraphy_sound = assets.load_audio('game/sounds/effects/telegraphy_void_wrath.wav')
+            VoidWrath.telegraphy_sound.set_volume(0.3)
+        self.telegraphy_sound = VoidWrath.telegraphy_sound
 
         self.effects = []
 
@@ -875,7 +885,7 @@ class VoidWrath(Enemy):
             pygame.draw.ellipse(trail_surf, (*trail_color, alpha), (0, 0, trail_radius*2, trail_radius*2))
             surface.blit(trail_surf, (int(tx - trail_radius - camera_x), int(ty - trail_radius - camera_y)) )
         # --- Render floating damage numbers ---
-        font = assets.get_font("game/assets/fonts/CinzelDecorative-Black.ttf", 18)
+        font = Enemy.damage_font
         damage_lifetime = 0.7
         damage_rise = 30
         now = time.time()
