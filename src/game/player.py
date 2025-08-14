@@ -46,6 +46,8 @@ class Player:
         self.interact_key_pressed = False
         self.immunity_timer = 0.0
         self.immunity_duration = 0.3  # seconds of immunity after taking damage
+        self._fire_powerup_timer = 0.0
+        self._fire_powerup_interval = 1.0  # seconds between Ignition effect applications
         # Swing state now handled by weapon (if MeleeWeapon)
 
         # Health, Stamina
@@ -85,18 +87,20 @@ class Player:
 
         # Power-up system
         self.powerups = {}  # theme -> current tier (int)
-        self.active_powerup_effects = []  # List of effect functions to apply
+        self.active_powerup_effects = set()  # Set of effect functions to apply
         self.attack_held = False  # Track if attack button is held
 
     def get_powerup_tier(self, theme):
             """Get current tier for a theme."""
             return self.powerups.get(theme, 0)
 
-    def apply_powerup(self, powerup):
+    def apply_powerup(self, powerup, mouse_pos=None, enemies=None):
         print(f"[DEBUG] Player: Applying power-up '{powerup.name}' (Theme: {powerup.theme}, Tier: {powerup.tier})")
         self.powerups[powerup.theme] = powerup.tier
         if not hasattr(self, 'stored_powerup_effects'):
-            self.stored_powerup_effects = []
+            self.stored_powerup_effects = set()
+        if not hasattr(self, 'active_powerup_effects'):
+            self.active_powerup_effects = set()
         # Determine effect type from theme or effect_func
         effect_type = None
         if hasattr(powerup, 'theme') and powerup.theme:
@@ -107,6 +111,12 @@ class Player:
                 except ImportError:
                     effect_type = None
             # Add more themes here as needed
+            if powerup.theme.lower() == 'fire':
+                try:
+                    from game.effects import FireEffect
+                    effect_type = FireEffect
+                except ImportError:
+                    effect_type = None
         # Fallback: try effect_func name
         if not effect_type and hasattr(powerup, 'effect_func') and powerup.effect_func:
             func_name = powerup.effect_func.__name__
@@ -116,11 +126,18 @@ class Player:
                     effect_type = PoisonEffect
                 except ImportError:
                     effect_type = None
-        if effect_type and effect_type not in self.stored_powerup_effects:
-            self.stored_powerup_effects.append(effect_type)
+            if 'fire' in func_name:
+                try:
+                    from game.effects import FireEffect
+                    effect_type = FireEffect
+                except ImportError:
+                    effect_type = None
+        # Store effect type and function in sets to avoid duplicates
+        if effect_type:
+            self.stored_powerup_effects.add(effect_type)
             print(f"[DEBUG][Player] Stored power-up effect type: {effect_type}")
-        if powerup.effect_func not in self.active_powerup_effects:
-            self.active_powerup_effects.append(powerup.effect_func)
+        if hasattr(powerup, 'effect_func') and powerup.effect_func:
+            self.active_powerup_effects.add(powerup.effect_func)
         print(f"[DEBUG] Player: Calling effect function for '{powerup.name}'")
         powerup.apply(self)
         print(f"[DEBUG] Player: Power-up '{powerup.name}' applied. Current powerups: {self.powerups}")
@@ -1099,17 +1116,41 @@ class Player:
     def apply_effects_to_all_weapons(self):
         """
         Apply all stored powerup effect types to every weapon in the player's inventory.
-        Ensures no duplicate effect types are added.
+        Ensures no duplicate effect types are added and updates effect parameters if tier changes.
         """
         if not hasattr(self, 'stored_powerup_effects'):
-            self.stored_powerup_effects = []
+            self.stored_powerup_effects = set()
         for weapon in self.weapons:
             if weapon is not None:
                 print(f"[DEBUG][Player] Weapon {weapon} has effects: {weapon.effects}")
                 print(f"[DEBUG][Player] Checking stored effect types {self.stored_powerup_effects}")
                 for effect_type in self.stored_powerup_effects:
-                    # Only add if not already present by type
-                    if not any(isinstance(e, effect_type) for e in weapon.effects):
+                    found = False
+                    for e in weapon.effects:
+                        if isinstance(e, effect_type):
+                            found = True
+                            # Update effect parameters if possible
+                            if effect_type.__name__ == 'PoisonEffect':
+                                if hasattr(e, 'level'):
+                                    e.level = self.get_powerup_tier('Poison')
+                                if hasattr(e, 'damage_per_tick'):
+                                    e.damage_per_tick = 2
+                                if hasattr(e, 'tick_interval'):
+                                    e.tick_interval = 1.0
+                                if hasattr(e, 'duration'):
+                                    e.duration = 3.0
+                            elif effect_type.__name__ == 'FireEffect':
+                                if hasattr(e, 'level'):
+                                    e.level = self.get_powerup_tier('Fire')
+                                if hasattr(e, 'damage_per_tick'):
+                                    e.damage_per_tick = 3
+                                if hasattr(e, 'tick_interval'):
+                                    e.tick_interval = 1.0
+                                if hasattr(e, 'duration'):
+                                    e.duration = 2.0
+                            # Add more effect types here as needed
+                            print(f"[DEBUG][Player] Updated effect {e} on weapon {weapon}")
+                    if not found:
                         # Create new effect instance
                         if effect_type.__name__ == 'PoisonEffect':
                             effect_instance = effect_type(
@@ -1118,7 +1159,28 @@ class Player:
                                 duration=3.0,
                                 level=self.get_powerup_tier('Poison') if hasattr(self, 'get_powerup_tier') else 1
                             )
+                        elif effect_type.__name__ == 'FireEffect':
+                            effect_instance = effect_type(
+                                damage_per_tick=3,
+                                tick_interval=1.0,
+                                duration=2.0,
+                                level=self.get_powerup_tier('Fire') if hasattr(self, 'get_powerup_tier') else 1
+                            )
                         else:
                             effect_instance = effect_type()
                         weapon.effects.append(effect_instance)
                         print(f"[DEBUG][Player] Applied stored effect {effect_instance} to weapon {weapon}")
+
+    def update_powerup_effects(self, dt, mouse_pos, enemies):
+        """
+        Call fire tier 1 effect (Ignition) every interval with latest mouse_pos and enemies.
+        Call this from your game loop.
+        """
+        if self.get_powerup_tier('Fire') >= 1:
+            self._fire_powerup_timer += dt
+            if self._fire_powerup_timer >= self._fire_powerup_interval:
+                self._fire_powerup_timer = 0.0
+                for effect_func in self.active_powerup_effects:
+                    if getattr(effect_func, '__name__', '') == 'ignition_effect':
+                        effect_func(self, mouse_pos, enemies)
+                        break

@@ -118,6 +118,7 @@ class GameEngine:
         self.clock = pygame.time.Clock()
         self.running = True
         self.previous_room_index = None
+        self.powerup_menu_shown_rooms = set()
         
         # Light sources
         self.light_sources = []  # Track all light sources
@@ -693,15 +694,24 @@ class GameEngine:
             # Handle menu events and drawing in main loop
             pass
         else:
-            # Only show menu if not in the first room
-            if self.dungeon.current_room_index > 0 and len(self.enemies) == 0 and not hasattr(self, 'powerup_menu_shown'):
+            room_id = getattr(self.room, 'id', self.dungeon.current_room_index)
+            if self.dungeon.current_room_index > 0 and len(self.enemies) == 0 and room_id not in self.powerup_menu_shown_rooms:
                 # Get available power-ups (example: from trees)
-                from game.powerups.power_up import PowerUpTree, poison1, poison2
+                from game.powerups.power_up import PowerUpTree, poison1, poison2, poison3, poison4, poison5, fire1, fire2, fire3, fire4, fire5
                 from game.powerups.power_up_menu import PowerUpMenu
                 # Example: build a list of trees and get next tier for each theme
-                trees = [PowerUpTree('Poison')]
+                trees = [PowerUpTree('Poison'), PowerUpTree('Fire')]
                 trees[0].add_powerup(poison1)
                 trees[0].add_powerup(poison2)
+                trees[0].add_powerup(poison3)
+                trees[0].add_powerup(poison4)
+                trees[0].add_powerup(poison5)
+                
+                trees[1].add_powerup(fire1)
+                trees[1].add_powerup(fire2)
+                trees[1].add_powerup(fire3)
+                trees[1].add_powerup(fire4)
+                trees[1].add_powerup(fire5)
                 available = []
                 for tree in trees:
                     tier = self.player.get_powerup_tier(tree.theme)
@@ -710,7 +720,7 @@ class GameEngine:
                 choices = random.sample(available, min(3, len(available)))
                 if choices:
                     self.powerup_menu = PowerUpMenu(choices, self.player, lambda p: self.player.apply_powerup(p))
-                    self.powerup_menu_shown = True
+                    self.powerup_menu_shown_rooms.add(room_id)
 
         # update room based on player position (bounding box detection)
         prev_room_index = self.dungeon.current_room_index

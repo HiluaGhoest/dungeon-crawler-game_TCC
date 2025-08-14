@@ -63,22 +63,36 @@ class Enemy:
     def _get_rect(self):
         return pygame.Rect(self.x, self.y, self.size, self.size)
 
-    def take_damage(self, amount, hit_direction=None):
-        # Ignore damage if already dying or spawning
+    def take_damage(self, amount, hit_direction=None, damage_type=None):
+        # Ignore damage if already dying or spawning (non-hittable while spawning)
         if getattr(self, 'is_dead', False) or getattr(self, 'spawning', False):
             return
+        # Apply vulnerability multiplier if present (for IgniteEffect)
+        amount *= getattr(self, 'fire_vulnerability', 1.0)
+        # If this is an instant kill, set damage color to white
+        if amount >= self.health:
+            self.damage_color_override = (255, 255, 255)
         self.health -= amount
         # Play hit sound effect
         if Enemy.hit_sound:
             SoundManager.get_instance().play_sfx(Enemy.hit_sound)
         # Add floating damage number
+        # Randomize damage number position to avoid overlap
+        rand_x_offset = random.randint(-12, 12)
+        rand_y_offset = random.randint(-8, 8)
+        # Default color: red. You can set self.damage_color_override before calling take_damage to customize.
+        damage_color = (255, 50, 50)
+        if hasattr(self, 'damage_color_override') and self.damage_color_override:
+            damage_color = self.damage_color_override
+            self.damage_color_override = None  # Clear after use, not in effect logic
         self.floating_damage.append({
             'damage': amount,
             'timestamp': time.time(),
-            'x': self.x + self.size // 2,
-            'y': self.y,
+            'x': self.x + self.size // 2 + rand_x_offset,
+            'y': self.y + rand_y_offset,
             'alpha': 255,
-            'offset': 0
+            'offset': 0,
+            'color': damage_color
         })
         # Start flash white effect
         self.flash_timer = self.flash_duration
@@ -105,10 +119,18 @@ class Enemy:
             self.die()
 
     def add_effect(self, effect):
+        # Prevent effects from being applied while spawning
+        if getattr(self, 'spawning', False):
+            return
         self.effects.append(effect)
         effect.apply(self)
 
     def die(self):
+        # Spread ignite to nearby enemies if ignited
+        for effect in self.effects:
+            from game.effects import IgniteEffect
+            if isinstance(effect, IgniteEffect) and effect.spread_radius > 0:
+                effect.spread_flames(self)
         # Play death sound effect
         if Enemy.death_sound:
             SoundManager.get_instance().play_sfx(Enemy.death_sound)
@@ -147,6 +169,8 @@ class Enemy:
         for effect in self.effects[:]:
             effect.update(self)
             if effect.is_expired():
+                if hasattr(effect, 'remove'):
+                    effect.remove(self)
                 self.effects.remove(effect)
         # Throttle heavy AI checks
         self._ai_timer += dt
@@ -286,8 +310,10 @@ class Enemy:
                 desired_x, desired_y = self._ai_cached
 
             # 4) Steering: ajuste suave da velocidade atual em direção ao desejado
-            self.vx += (desired_x * self.speed - self.vx) * self.steer_strength
-            self.vy += (desired_y * self.speed - self.vy) * self.steer_strength
+            speed_mult = getattr(self, "speed_multiplier", 1.0)
+            effective_speed = self.speed * speed_mult
+            self.vx += (desired_x * effective_speed - self.vx) * self.steer_strength
+            self.vy += (desired_y * effective_speed - self.vy) * self.steer_strength
 
             # 5) Atualiza posição
             # Unified movement and collision block
@@ -442,7 +468,8 @@ class Enemy:
                     continue
                 alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
                 offset = int((elapsed / damage_lifetime) * damage_rise)
-                dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+                dmg_color = dmg.get('color', (255, 50, 50))
+                dmg_text = font.render(str(dmg['damage']), True, dmg_color)
                 dmg_surf = self._get_damage_surface(dmg_text.get_size())
                 dmg_surf.fill((0,0,0,0))
                 dmg_surf.blit(dmg_text, (0, 0))
@@ -489,7 +516,8 @@ class Enemy:
             # Fade out and move up
             alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
             offset = int((elapsed / damage_lifetime) * damage_rise)
-            dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+            dmg_color = dmg.get('color', (255, 50, 50))
+            dmg_text = font.render(str(dmg['damage']), True, dmg_color)
             dmg_surf = self._get_damage_surface(dmg_text.get_size())
             dmg_surf.fill((0,0,0,0))
             dmg_surf.blit(dmg_text, (0, 0))
@@ -583,11 +611,12 @@ class VoidWrath(Enemy):
 
         self.effects = []
 
-    def take_damage(self, amount, hit_direction=None):
-        # Ignore damage if spawning
+    def take_damage(self, amount, hit_direction=None, damage_type=None):
+        # Ignore damage if spawning (non-hittable while spawning)
         if getattr(self, 'spawning', False):
             return
-        super().take_damage(amount, hit_direction=hit_direction)
+        # Use Enemy's take_damage for all logic, including color
+        super().take_damage(amount, hit_direction=hit_direction, damage_type=damage_type)
         # Flash white effect for VoidWrath
         self.flash_timer = self.flash_duration
         # Knockback effect for VoidWrath
@@ -598,6 +627,9 @@ class VoidWrath(Enemy):
 
 
     def add_effect(self, effect):
+        # Prevent effects from being applied while spawning
+        if getattr(self, 'spawning', False):
+            return
         self.effects.append(effect)
         effect.apply(self)
 
@@ -671,6 +703,8 @@ class VoidWrath(Enemy):
                 dx = px - self.x
                 dy = py - self.y
                 dist = math.hypot(dx, dy)
+                speed_mult = getattr(self, "speed_multiplier", 1.0)
+                dash_speed = self.dash_speed * speed_mult
                 if dist > 0:
                     dash_dx = dx / dist
                     dash_dy = dy / dist
@@ -679,16 +713,16 @@ class VoidWrath(Enemy):
                 self.dash_start = (self.x, self.y)
                 # Dash vai até um ponto logo APÓS o jogador (ex: 1.2x a distância até o jogador)
                 dash_multiplier = 1.2
-                dash_target_x = self.x + dash_dx * dist * dash_multiplier
-                dash_target_y = self.y + dash_dy * dist * dash_multiplier
+                dash_target_x = self.x + dash_dx * dist * dash_multiplier * dash_speed / self.dash_speed
+                dash_target_y = self.y + dash_dy * dist * dash_multiplier * dash_speed / self.dash_speed
                 # Checa colisão com paredes no caminho
-                dash_steps = int(dist * dash_multiplier)
+                dash_steps = int(dist * dash_multiplier * dash_speed / self.dash_speed)
                 last_safe_x = self.x
                 last_safe_y = self.y
                 collision_found = False
                 for step in range(1, dash_steps+1):
-                    test_x = self.x + dash_dx * step
-                    test_y = self.y + dash_dy * step
+                    test_x = self.x + dash_dx * step * dash_speed / self.dash_speed
+                    test_y = self.y + dash_dy * step * dash_speed / self.dash_speed
                     test_rect = pygame.Rect(test_x, test_y, self.size, self.size)
                     engine = getattr(self, 'engine', None)
                     wall_rects = []
@@ -784,6 +818,13 @@ class VoidWrath(Enemy):
             if self.flash_timer < 0.0:
                 self.flash_timer = 0.0
 
+    def update_powerup_effects(self, dt, mouse_pos=None, enemies=None):
+        """
+        Stub for enemy-specific power-up logic. Currently does nothing.
+        Extend here if you want enemies to have timed effects or react to power-up logic.
+        """
+        pass
+
     def draw(self, surface, camera_x=0, camera_y=0, zoom=1.0):
         if getattr(self, 'removed', False):
             return
@@ -813,7 +854,8 @@ class VoidWrath(Enemy):
                     continue
                 alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
                 offset = int((elapsed / damage_lifetime) * damage_rise)
-                dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+                dmg_color = dmg.get('color', (255, 50, 50))
+                dmg_text = font.render(str(dmg['damage']), True, dmg_color)
                 dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
                 dmg_surf.blit(dmg_text, (0, 0))
                 dmg_surf.set_alpha(alpha)
@@ -844,7 +886,8 @@ class VoidWrath(Enemy):
                 continue
             alpha = max(0, 255 - int((elapsed / damage_lifetime) * 255))
             offset = int((elapsed / damage_lifetime) * damage_rise)
-            dmg_text = font.render(str(dmg['damage']), True, (255, 50, 50))
+            dmg_color = dmg.get('color', (255, 50, 50))
+            dmg_text = font.render(str(dmg['damage']), True, dmg_color)
             dmg_surf = pygame.Surface(dmg_text.get_size(), pygame.SRCALPHA)
             dmg_surf.blit(dmg_text, (0, 0))
             dmg_surf.set_alpha(alpha)

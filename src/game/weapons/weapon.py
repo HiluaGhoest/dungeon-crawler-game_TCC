@@ -30,12 +30,17 @@ class Weapon:
         raise NotImplementedError
 
     def apply_effects(self, target):
-        """Applies weapon effects to target by creating new instances"""
+        """Applies weapon effects to target, supporting both function (chance) and instance/class effects."""
         print(f"[DEBUG][Weapon.apply_effects] Weapon: {self.name}, Effects: {self.effects}, Target: {target}")
         for effect_template in getattr(self, 'effects', []):
+            # If effect is a function, call it with target (for chance-based effects)
+            if callable(effect_template):
+                print(f"[DEBUG][Weapon.apply_effects] Calling effect function: {effect_template}")
+                effect_template(target)
+                continue
+            # Otherwise, instantiate and apply as before
             print(f"[DEBUG][Weapon.apply_effects] Creating effect instance from template: {effect_template}")
             effect_cls = effect_template if isinstance(effect_template, type) else type(effect_template)
-            # Use attributes from instance if available, else defaults
             kwargs = {}
             for attr in ['damage_per_tick', 'tick_interval', 'duration', 'level']:
                 val = getattr(effect_template, attr, None)
