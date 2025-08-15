@@ -112,11 +112,11 @@ class IgniteEffect(DamageEffect):
         if now - self.last_tick >= self.tick_interval and self.active:
             self.last_tick = now
             self.deal_damage(target)
-            # Spread flames if enabled
-            if self.spread_radius > 0:
-                self.spread_flames(target)
         if self.is_expired():
             self.remove(target)
+            # Spread flames only when effect expires (e.g., on death)
+            if self.spread_radius > 0:
+                self.spread_flames(target)
 
     def spread_flames(self, target):
         # Use engine.enemies if available, else room.enemies
@@ -126,6 +126,7 @@ class IgniteEffect(DamageEffect):
         elif hasattr(target, 'room') and hasattr(target.room, 'enemies'):
             enemies = target.room.enemies
         if enemies:
+            spread_count = 0
             for enemy in enemies:
                 if enemy is not target:
                     dist = ((enemy.x - target.x) ** 2 + (enemy.y - target.y) ** 2) ** 0.5
@@ -141,6 +142,9 @@ class IgniteEffect(DamageEffect):
                             )
                             enemy.add_effect(ignite)
                             print(f"[DEBUG][Effect] Ignite spread to {enemy}")
+                            spread_count += 1
+                            if spread_count >= 3:
+                                break
 
     def remove(self, target):
         # Remove vulnerability multiplier

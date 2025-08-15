@@ -123,6 +123,11 @@ class Enemy:
         # Prevent effects from being applied while spawning
         if getattr(self, 'spawning', False):
             return
+        # Evita múltiplos IgniteEffect no mesmo inimigo
+        from game.effects import IgniteEffect
+        if isinstance(effect, IgniteEffect):
+            if any(isinstance(e, IgniteEffect) and e.active for e in self.effects):
+                return
         self.effects.append(effect)
         effect.apply(self)
 

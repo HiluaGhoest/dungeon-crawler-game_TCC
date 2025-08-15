@@ -143,8 +143,19 @@ class Dungeon:
                     room_queue.append(child_idx)
                     visited.add(child_idx)
 
+                    p = 0.5
+                    x = self.room_depth[child_idx]
+                    if 0 <= x <= 1:
+                        enemy_value = int((9 * x**2) / 8)
+                    elif 1 < x:
+                        enemy_value = int(8 * x**2 / 8.5)
+                    else:
+                        enemy_value = 0
+
+
+
                     # Criar inimigos na sala filha
-                    self.spawn_enemies_in_room(child_idx, num_enemies=int((9 * self.room_depth[child_idx] ** 2) / 7), 
+                    self.spawn_enemies_in_room(child_idx, num_enemies=enemy_value, 
                                                    enemy_classes=[Enemy, VoidWrath])
 
         print(f"[DUNGEON] Created {rooms_created} rooms with branching structure")

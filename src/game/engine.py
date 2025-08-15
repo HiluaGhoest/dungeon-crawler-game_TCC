@@ -313,6 +313,35 @@ class GameEngine:
 
         self.enemies = []
         self.stardusts = []
+        # Floor system
+        self.current_floor = 1
+        self.max_floor = 99
+
+    def descend_floor(self):
+        """Desce para o próximo andar, gerando novo dungeon e aumentando dificuldade."""
+        if self.current_floor < self.max_floor:
+            self.current_floor += 1
+            # Gera novo dungeon
+            self.dungeon = Dungeon(tile_size=20, total_rooms=25, branching_factor=3)
+            self.room = self.dungeon.get_current_room()
+            self._room_wall_rect_cache = {}
+            self.current_wall_rect = None
+            self.current_room_rect = None
+            # Reposiciona player
+            spawn_x, spawn_y = self.dungeon.get_player_spawn_position()
+            self.player.set_position(spawn_x, spawn_y)
+            self.camera_x = spawn_x - self.width // 2
+            self.camera_y = spawn_y - self.height // 2
+            # Limpa projéteis e stardusts
+            self.projectiles.clear()
+            self.stardusts.clear()
+            # Atualiza inimigos do novo andar
+            self.enemies = getattr(self.room, 'enemies', []) if hasattr(self.room, 'enemies') else []
+            # Aplica multiplicador de vida nos inimigos
+            for room in self.dungeon.rooms.values():
+                if hasattr(room, 'enemies'):
+                    for enemy in room.enemies:
+                        enemy.health = int(enemy.health * (1 + 0.5 * (self.current_floor - 1)))
         
     def update_crosshair(self, dt):
         """Smoothly transition between crosshair states"""
@@ -795,38 +824,46 @@ class GameEngine:
                 self.stardusts.remove(stardust)
 
         # --- POWER-UP MENU TRIGGER ---
-        # If all enemies in the room are cleared and menu not already active, show power-up menu
-        if hasattr(self, 'powerup_menu') and self.powerup_menu and self.powerup_menu.active:
-            # Handle menu events and drawing in main loop
-            pass
+        # Se todas as salas estiverem limpas de inimigos, desce para o próximo andar
+        all_rooms_cleared = all(
+            hasattr(room, 'enemies') and len(room.enemies) == 0
+            for room in self.dungeon.rooms.values()
+        )
+        if all_rooms_cleared:
+            self.descend_floor()
         else:
-            room_id = getattr(self.room, 'id', self.dungeon.current_room_index)
-            if self.dungeon.current_room_index > 0 and len(self.enemies) == 0 and room_id not in self.powerup_menu_shown_rooms:
-                # Get available power-ups (example: from trees)
-                from game.powerups.power_up import PowerUpTree, poison1, poison2, poison3, poison4, poison5, fire1, fire2, fire3, fire4, fire5
-                from game.powerups.power_up_menu import PowerUpMenu
-                # Example: build a list of trees and get next tier for each theme
-                trees = [PowerUpTree('Poison'), PowerUpTree('Fire')]
-                trees[0].add_powerup(poison1)
-                trees[0].add_powerup(poison2)
-                trees[0].add_powerup(poison3)
-                trees[0].add_powerup(poison4)
-                trees[0].add_powerup(poison5)
-                
-                trees[1].add_powerup(fire1)
-                trees[1].add_powerup(fire2)
-                trees[1].add_powerup(fire3)
-                trees[1].add_powerup(fire4)
-                trees[1].add_powerup(fire5)
-                available = []
-                for tree in trees:
-                    tier = self.player.get_powerup_tier(tree.theme)
-                    available += tree.get_available_powerups(tier)
-                # Pick 3 random available power-ups
-                choices = random.sample(available, min(3, len(available)))
-                if choices:
-                    self.powerup_menu = PowerUpMenu(choices, self.player, lambda p: self.player.apply_powerup(p))
-                    self.powerup_menu_shown_rooms.add(room_id)
+            # If all enemies in the room are cleared and menu not already active, show power-up menu
+            if hasattr(self, 'powerup_menu') and self.powerup_menu and self.powerup_menu.active:
+                # Handle menu events and drawing in main loop
+                pass
+            else:
+                room_id = getattr(self.room, 'id', self.dungeon.current_room_index)
+                if self.dungeon.current_room_index > 0 and len(self.enemies) == 0 and room_id not in self.powerup_menu_shown_rooms:
+                    # Get available power-ups (example: from trees)
+                    from game.powerups.power_up import PowerUpTree, poison1, poison2, poison3, poison4, poison5, fire1, fire2, fire3, fire4, fire5
+                    from game.powerups.power_up_menu import PowerUpMenu
+                    # Example: build a list of trees and get next tier for each theme
+                    trees = [PowerUpTree('Poison'), PowerUpTree('Fire')]
+                    trees[0].add_powerup(poison1)
+                    trees[0].add_powerup(poison2)
+                    trees[0].add_powerup(poison3)
+                    trees[0].add_powerup(poison4)
+                    trees[0].add_powerup(poison5)
+                    
+                    trees[1].add_powerup(fire1)
+                    trees[1].add_powerup(fire2)
+                    trees[1].add_powerup(fire3)
+                    trees[1].add_powerup(fire4)
+                    trees[1].add_powerup(fire5)
+                    available = []
+                    for tree in trees:
+                        tier = self.player.get_powerup_tier(tree.theme)
+                        available += tree.get_available_powerups(tier)
+                    # Pick 3 random available power-ups
+                    choices = random.sample(available, min(3, len(available)))
+                    if choices:
+                        self.powerup_menu = PowerUpMenu(choices, self.player, lambda p: self.player.apply_powerup(p))
+                        self.powerup_menu_shown_rooms.add(room_id)
 
         # update room based on player position (bounding box detection)
         prev_room_index = self.dungeon.current_room_index
@@ -1373,3 +1410,268 @@ class GameEngine:
         # smooth-damp toward target
         self.camera_x += (target_camera_x - self.camera_x) * smoothing
         self.camera_y += (target_camera_y - self.camera_y) * smoothing
+
+    # Persistent virtual surface for zoomed rendering
+    def run_game_over_screen(self):
+        """Show a game over overlay and wait for player to restart the floor or quit."""
+        overlay_alpha = 160
+        animation_time = 0.0
+        animation_duration = 1.2  # seconds for fade-in
+        running_game_over = True
+        button_restart = Button("Restart Floor", (self.width//2 - 150, self.height//2 + 40, 300, 60), action=None)
+        button_quit = Button("Quit", (self.width//2 - 150, self.height//2 + 120, 300, 60), action=None)
+        buttons = [button_restart, button_quit]
+        selected_index = 0
+        self.game_over_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 64)
+        text_surf = self.game_over_font.render("GAME OVER", True, (255, 60, 60))
+        text_rect = text_surf.get_rect(center=(self.width//2, self.height//2 - 80))
+        overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, overlay_alpha))
+        mouse_active = False
+        pygame.mouse.set_visible(False)
+
+        def restart():
+            nonlocal running_game_over
+            running_game_over = False
+            # Fully reload the game by restarting the process
+
+        def quit_game():
+            nonlocal running_game_over
+            self.running = False
+            running_game_over = False
+
+        button_restart.action = restart
+        button_quit.action = quit_game
+
+        while running_game_over and self.running:
+            self.dt = self.clock.get_time() / 1000.0
+            self.update_crosshair(self.dt)
+            self.update_crosshair_particles(self.dt)
+            mouse_pos = pygame.mouse.get_pos()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+                    running_game_over = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        buttons[selected_index].action()
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        selected_index = (selected_index + 1) % len(buttons)
+                        mouse_active = False
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        selected_index = (selected_index - 1) % len(buttons)
+                        mouse_active = False
+                elif event.type == pygame.MOUSEMOTION:
+                    for i, button in enumerate(buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            selected_index = i
+                            mouse_active = True
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    for i, button in enumerate(buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            selected_index = i
+                            button.action()
+            # Proper fade calculation
+            animation_time += self.dt
+            fade = min(1.0, animation_time / animation_duration)
+
+            # Draw last frame as background (optional: could use a snapshot)
+            self.render(do_flip=False)
+            # Overlay
+            overlay.set_alpha(int(overlay_alpha * fade))
+            self.screen.blit(overlay, (0, 0))
+            # Game Over text
+            text_surf.set_alpha(int(255 * fade))
+            self.screen.blit(text_surf, text_rect)
+            # Draw buttons
+            for i, button in enumerate(buttons):
+                is_selected = (i == selected_index)
+                button.draw(self.screen, mouse_pos, selected=is_selected)
+            # Crosshair
+            crosshair_img = self.current_crosshair if hasattr(self, 'current_crosshair') else None
+            crosshair_offset = self.crosshair_offset if hasattr(self, 'crosshair_offset') else (0, 0)
+            if crosshair_img:
+                self.screen.blit(crosshair_img, (mouse_pos[0] - crosshair_offset[0], mouse_pos[1] - crosshair_offset[1]))
+            pygame.display.flip()
+
+        # After leaving, reset mouse visibility
+        pygame.mouse.set_visible(True)
+    # Track previous room index for rendering
+    def __init__(self, screen, width=800, height=600, title="Dungeon Crawler", fullscreen=True):
+        self.mouse_attack_held = False  # Track if mouse attack button is held
+        
+        # Configurar fullscreen
+        if fullscreen:
+            info = pygame.display.Info()
+            self.width = info.current_w
+            self.height = info.current_h
+            self.screen = screen
+        else:
+            self.width = width
+            self.height = height
+            self.screen = screen
+            
+        pygame.display.set_caption(title)
+        self.clock = pygame.time.Clock()
+        self.running = True
+        self.previous_room_index = None
+        self.powerup_menu_shown_rooms = set()
+        
+        # Light sources
+        self.light_sources = []  # Track all light sources
+        self.light_cache = {} # Cache for light textures
+
+        # Câmera/viewport
+        self.camera_x = 0
+        self.camera_y = 0
+        self.zoom = 1.3
+        self.camera_smoothing = 0.1
+
+        # Track previous room index for rendering
+        self.previous_room_index = None
+
+        # Criar o dungeon
+        self.dungeon = Dungeon(tile_size=20, total_rooms=25, branching_factor=3)
+        
+        # Obter a sala atual
+        self.room = self.dungeon.get_current_room()
+        # Cache for wall rects per room
+        self._room_wall_rect_cache = {}
+        # Cached wall rects and room rect for current room
+        self.current_wall_rects = None
+        self.current_room_rect = None
+
+        # Get spawn position from dungeon
+        spawn_x, spawn_y = self.dungeon.get_player_spawn_position()
+        self.player = Player(spawn_x, spawn_y)
+        self.dungeon.player = self.player
+
+        # Initialize camera
+        self.camera_x = spawn_x - self.width // 2
+        self.camera_y = spawn_y - self.height // 2
+
+        # FPS monitor
+        self.show_fps = False
+        self.fps_font = get_font("game/assets/fonts/CinzelDecorative-Regular.ttf", 32)
+
+        # Collision rects debug
+        self.show_collision_rects = False
+
+        # --- GLOBAL PROJECTILES LIST ---
+        if not hasattr(builtins, 'projectiles') or not isinstance(builtins.projectiles, list):
+            builtins.projectiles = []
+        self.projectiles = builtins.projectiles
+
+        # Persistent darkness overlay surface (for performance)
+        self.virtual_surface = None
+        self.darkness_overlay = None
+
+        # Crosshair particles
+        self.crosshair_particles = []
+        self.particle_spawn_timer = 0
+        self.particle_spawn_interval = 0.05  # seconds between particles
+        self.particle_lifetime = 0.5  # seconds
+        self.particle_colors = [
+            (255, 255, 255),  # white
+            (230, 230, 255),  # light blue-white
+            (255, 230, 230)   # light pink-white
+        ]
+
+        # Load crosshair sprite
+        try:
+            self.crosshair_normal = get_image("crosshair_normal", "game/assets/sprites/ui/cursor/cursor.png")
+            self.crosshair_attack = get_image("crosshair_attack", "game/assets/sprites/ui/cursor/cursor_attack.png")
+            # Scale if needed (example scales to 16x16)
+            size = (16, 16)
+            if self.crosshair_normal:
+                self.crosshair_normal = pygame.transform.scale(self.crosshair_normal, size)
+            if self.crosshair_attack:
+                self.crosshair_attack = pygame.transform.scale(self.crosshair_attack, size)
+            if not self.crosshair_normal or not self.crosshair_attack:
+                raise Exception("Missing crosshair image")
+        except:
+            # Fallback: create simple crosshairs if images not found
+            size = (32, 32)
+            self.crosshair_normal = pygame.Surface(size, pygame.SRCALPHA)
+            pygame.draw.line(self.crosshair_normal, (255, 255, 255), (16, 0), (16, 32), 2)
+            pygame.draw.line(self.crosshair_normal, (255, 255, 255), (0, 16), (32, 16), 2)
+            self.crosshair_attack = pygame.Surface(size, pygame.SRCALPHA)
+            pygame.draw.line(self.crosshair_attack, (255, 0, 0), (16, 0), (16, 32), 3)
+            pygame.draw.line(self.crosshair_attack, (255, 0, 0), (0, 16), (32, 16), 3)
+            
+        # Current crosshair (starts as normal)
+        self.current_crosshair = self.crosshair_normal
+        self.crosshair_offset = (size[0] // 2, size[1] // 2)
+        self.is_paused = False  # Flag para pausar atualizações
+        self.pause_start_time = 0  # Armazenará quando o pause começou
+
+            
+        # For smooth transitions
+        self.crosshair_scale = 1.0
+        self.target_scale = 1.0
+
+        self.enemies = []
+        self.stardusts = []
+        
+    def update_crosshair(self, dt):
+        """Smoothly transition between crosshair states"""
+        if self.mouse_attack_held:
+            self.target_scale = 0.8  # Smaller when attacking
+            self.current_crosshair = self.crosshair_attack
+        else:
+            self.target_scale = 1.0  # Normal size
+            self.current_crosshair = self.crosshair_normal
+        
+        # Smooth scaling animation
+        self.crosshair_scale += (self.target_scale - self.crosshair_scale) * 0.2
+        
+        # Ensure we don't get stuck in between values
+        if abs(self.crosshair_scale - self.target_scale) < 0.01:
+            self.crosshair_scale = self.target_scale
+            
+    def update_crosshair_particles(self, dt):
+        # Update existing particles
+        for particle in self.crosshair_particles[:]:
+            particle['time'] += dt
+            particle['alpha'] = int(255 * (1 - (particle['time'] / self.particle_lifetime)))
+            if particle['time'] >= self.particle_lifetime:
+                self.crosshair_particles.remove(particle)
+        
+        # Spawn new particles
+        self.particle_spawn_timer += dt
+        if self.particle_spawn_timer >= self.particle_spawn_interval:
+            self.particle_spawn_timer = 0
+            mouse_pos = pygame.mouse.get_pos()
+            
+            # Add some randomness to position
+            offset = pygame.math.Vector2(
+                random.uniform(-10, 10),
+                random.uniform(-10, 10)
+            )
+
+            self.crosshair_particles.append({
+                'pos': pygame.math.Vector2(mouse_pos[0] + offset.x, mouse_pos[1] + offset.y),
+                'time': 0,
+                'alpha': 255,
+                'radius': random.uniform(1, 3),
+                'color': random.choice(self.particle_colors),
+                'velocity': pygame.math.Vector2(
+                    random.uniform(-20, 20),
+                    random.uniform(5, 15))  # slight downward drift
+            })
+            
+    def add_light_source(self, x, y, radius, intensity=255):
+        self.light_sources.append({
+            'pos': (x, y),
+            'radius': radius,
+            'intensity': intensity
+        })
+        
+    def get_light_texture(self, radius, max_alpha):
+        key = (radius, max_alpha)
+        if key not in self.light_cache:
+            # Create and cache light surface
+            texture = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            for r in range(radius, 0, -1):
+                alpha = int(max_alpha * (r/radius))
+                pygame.draw.circle(texture, (0,0,0,alpha), (radius, radius), r)
